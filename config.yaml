@@ -16,12 +16,15 @@ bankroll:
 # ── Who can trigger a buy ─────────────────────────────────────
 # Use the numeric X user ID (never just the handle): handles can be
 # changed or impersonated, the ID can't. Find an ID at tweeterid.com.
+# keywords: names a narrative coin would use (their name, nicknames, catchphrases).
+# Leave id "" to have it looked up from X at startup (needs X_BEARER_TOKEN).
 celebrities:
-  - { handle: elonmusk,        id: "44196397" }
-  - { handle: realDonaldTrump, id: "25073877" }
-  - { handle: cz_binance,      id: "902926941413453824" }
-  - { handle: saylor,          id: "244647486" }
-  # - { handle: someone,       id: "123..." }
+  - { handle: elonmusk,        id: "44196397",           keywords: [elon, musk, doge, kekius, xai, grok] }
+  - { handle: realDonaldTrump, id: "25073877",           keywords: [trump, maga, melania, barron] }
+  - { handle: cz_binance,      id: "902926941413453824", keywords: [binance, bnb] }
+  - { handle: saylor,          id: "244647486",          keywords: [saylor] }
+  - { handle: Cobratate,       id: "",                   keywords: [tate, topg, cobra, tristan, hustlers] }
+  # - { handle: someone,       id: "123...",             keywords: [nickname, catchphrase] }
 
 twitter:
   source: x_stream           # x_stream (official X API filtered stream) | webhook (any alert service POSTs to us)
@@ -70,6 +73,61 @@ clusters:                    # bubble-map style: which top holders were funded b
   max_cluster_pct: 12        # one funder's wallets together may hold at most this
   max_dev_linked_pct: 5      # wallets funded by / funding the creator
   max_signatures_scan: 1000  # older, busier wallets are treated as independent
+
+# ── Rule profiles by market cap ───────────────────────────────
+# EARLY = catching it small, before the millions. Smaller bets: most small coins still die.
+profiles:
+  early:
+    min_mcap_usd: 20000
+    max_mcap_usd: 1500000
+    risk_per_trade_pct: 4
+    universe: { min_liquidity_usd: 12000, min_volume_1h_usd: 8000, max_mcap_to_liquidity: 60 }
+    safety:   { min_holders: 40, max_top10_holders_pct: 25, max_insider_cluster_pct: 10, max_dev_holding_pct: 5 }
+    lp_exempt_market_types: [pump_fun, pumpfun, raydium_launchlab, meteora_dbc]   # bonding curves can't be LP-pulled
+  # anything above max_mcap_usd uses the main universe / safety rules
+
+# ── Smart money: KOL + celebrity wallets ──────────────────────
+kol:
+  enabled: true
+  registry: data/kols.json
+  # quality — do they actually make money?
+  min_win_rate: 55
+  min_pnl_30d_usd: 5000
+  min_closed_trades: 20
+  max_rug_rate: 0.35
+  pnl_for_full_score: 100000
+  # followability — can we act on their moves in time?
+  min_median_hold_s: 300         # wallets that flip in seconds are bots to us: ignored
+  full_follow_hold_s: 3600
+  max_trades_7d: 1500
+  max_flip_rate: 0.6
+  # entries
+  check_balances_on_entry: true  # on a celebrity tweet: which proven wallets already hold it?
+  balance_check_top_n: 25
+  size_step_per_weight: 0.5      # size multiplier = 1 + 0.5 x total smart-money weight ...
+  max_size_multiplier: 2.0       # ... capped at 2x
+  cluster_window_s: 900          # proven wallets buying the same coin within 15 min = a cluster
+  cluster_min_wallets: 3
+  cluster_min_weight: 1.5
+  allow_cluster_entries_without_celebrity: false   # you asked for celebrity hype only
+  # decoding their sells
+  full_exit_fraction: 0.9        # sold >= 90% of their bag = they're out
+  early_exit_fraction: 0.5       # out in under half their usual hold time = they know something
+  early_exit_min_weight: 0.4
+  trim_share: 0.25               # 25% of the smart money out -> sell half of what's left
+  exit_share: 0.5                # 50% out -> sell everything
+
+# ── Celebrity-name narrative coins (the Andrew Tate effect) ───
+narrative:
+  enabled: true
+  hot_hours: 12                  # a celebrity stays "hot" this long after posting
+  lookback_hours: 72             # only coins launched in this window
+  radar_hours: 24
+  radar_max: 200
+  min_keyword_len: 3
+  max_keywords_per_tweet: 4
+  search_on_tweet: true          # also search all DEXes for coins named after the post
+  new_token_stream: true         # PumpPortal: every new pump.fun launch, free
 
 rugwatch:                    # after buying: watch for the rug in real time
   enabled: true

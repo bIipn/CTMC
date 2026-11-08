@@ -27,6 +27,7 @@ class PairSnapshot:
     created_at_ms: int
     ts: float = field(default_factory=time)
     pools: dict[str, float] = field(default_factory=dict)   # dex -> liquidity USD
+    name: str = ""
     market_cap: float = 0.0
     holders: int = 0
     unique_wallets_1h: int = 0
@@ -72,6 +73,7 @@ class Position:
     realized_usd: float = 0.0
     ladder_hits: list[float] = field(default_factory=list)   # multiples already sold at
     source: str = ""              # e.g. "@elonmusk tweet 1789..."
+    profile: str = ""             # "early" | "established"
     low_volume_streak: int = 0
 
     def __post_init__(self) -> None:

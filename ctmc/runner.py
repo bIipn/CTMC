@@ -10,15 +10,20 @@ from rich.live import Live
 
 from ctmc.dashboard import render
 from ctmc.data.market import Market, PriceFeed
-from ctmc.feeds.twitter import WebhookSource, make_source
+from ctmc.feeds.pumpportal import PumpPortalStream
+from ctmc.feeds.twitter import WebhookSource, make_source, resolve_ids
+from ctmc.kol.registry import Registry
+from ctmc.kol.signals import SmartMoney
+from ctmc.kol.tracker import KolTracker
 from ctmc.safety.checker import SafetyChecker
 from ctmc.safety.rugwatch import RugWatch
 from ctmc.signals.hype import HypeChecker
+from ctmc.signals.narrative import Narrative
 from ctmc.strategy.engine import Trader
 
 
 async def run(cfg, live: bool, console: Console) -> None:
-    http = httpx.AsyncClient(timeout=10, limits=httpx.Limits(max_connections=50, max_keepalive_connections=20))
+    http = httpx.AsyncClient(timeout=10, limits=httpx.Limits(max_connections=60, max_keepalive_connections=20))
     market = Market(cfg.chain, http)
     if live:
         from ctmc.execution.broker import JupiterBroker
@@ -28,12 +33,33 @@ async def run(cfg, live: bool, console: Console) -> None:
         from ctmc.execution.broker import PaperBroker
         broker = PaperBroker(cfg.bankroll["starting_usd"], cfg["execution"])
 
+    unresolved = await resolve_ids(cfg["celebrities"], http)       # fill missing X user IDs
     trader = Trader(cfg, broker, market, SafetyChecker(cfg["safety"], cfg["clusters"], http),
                     HypeChecker(cfg["hype"], http))
-    rugwatch = None
+    for handle in unresolved:
+        trader.log("HALT", f"@{handle}", "no X user ID — their tweets can't be verified, so they're ignored")
+
+    tasks_extra: list = []
     if cfg["rugwatch"].get("enabled", True):
-        rugwatch = RugWatch(cfg["rugwatch"], on_alert=lambda m, why: trader.on_rug_alert(m, why), http=http)
-        trader.rugwatch = rugwatch
+        trader.rugwatch = RugWatch(cfg["rugwatch"], on_alert=lambda m, why: trader.on_rug_alert(m, why), http=http)
+        tasks_extra.append(("rugwatch", trader.rugwatch.run))
+
+    tracker = None
+    if cfg["kol"].get("enabled", True):
+        registry = Registry(cfg["kol"].get("registry", "data/kols.json")).load()
+        tracker = KolTracker(registry, cfg["kol"], on_trade=lambda t: trader.on_kol_trade(t), http=http)
+        trader.smart = SmartMoney(registry, tracker, cfg["kol"])
+        tasks_extra.append(("kol wallets", tracker.run))
+        n = len(registry.tracked(cfg["kol"]))
+        trader.log("KOL", "-", f"tracking {n} proven / celebrity wallets of {len(registry.kols)} in the registry"
+                   + ("" if n else " — run `python -m ctmc kols import` to fill it"))
+
+    if cfg["narrative"].get("enabled", True):
+        trader.narrative = Narrative(cfg["celebrities"], cfg["narrative"])
+        if cfg["narrative"].get("new_token_stream", True):
+            stream = PumpPortalStream(on_new=trader.on_new_token)
+            tasks_extra.append(("pump.fun launches", stream.run))
+
     feed = PriceFeed(market, cfg.monitor["price_refresh_seconds"])
     feed.watch.update(cfg.leaders.values())
     trader.on_watch = feed.watch.add
@@ -41,7 +67,8 @@ async def run(cfg, live: bool, console: Console) -> None:
     source = make_source(cfg)
     mode = "live" if live else "paper"
     feeds = (f"tweets: {'webhook :' + str(cfg.twitter['webhook_port']) if isinstance(source, WebhookSource) else 'X stream'}"
-             f" · prices every {cfg.monitor['price_refresh_seconds']}s · flow every {cfg.monitor['metrics_refresh_seconds']}s")
+             f" · prices every {cfg.monitor['price_refresh_seconds']}s · flow every {cfg.monitor['metrics_refresh_seconds']}s"
+             + (f" · {len(tracker.registry.wallets(cfg['kol']))} smart wallets live" if tracker else ""))
 
     async def metrics_loop() -> None:
         while True:
@@ -50,6 +77,7 @@ async def run(cfg, live: bool, console: Console) -> None:
             if held or backed:
                 for snap in (await market.snapshots(held + backed)).values():
                     await trader.on_metrics(snap)
+            await trader.check_radar()
             await asyncio.sleep(cfg.monitor["metrics_refresh_seconds"])
 
     async def guarded(name: str, coro_fn) -> None:
@@ -72,7 +100,7 @@ async def run(cfg, live: bool, console: Console) -> None:
             asyncio.create_task(guarded("tweets", lambda: source.run(trader.on_tweet))),
             asyncio.create_task(guarded("prices", lambda: feed.run(trader.on_price))),
             asyncio.create_task(guarded("flow", metrics_loop)),
-            *([asyncio.create_task(guarded("rugwatch", rugwatch.run))] if rugwatch else []),
+            *[asyncio.create_task(guarded(name, fn)) for name, fn in tasks_extra],
             asyncio.create_task(ui_loop(live_ui)),
         ]
         try:

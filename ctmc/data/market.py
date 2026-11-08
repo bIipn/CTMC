@@ -56,6 +56,7 @@ def aggregate_pairs(pairs: list[dict], chain: str = "solana") -> PairSnapshot | 
         buys_h1=txns("h1", "buys"), sells_h1=txns("h1", "sells"),
         created_at_ms=min(created) if created else 0,
         pools=pools, market_cap=_f(deepest, "marketCap") or _f(deepest, "fdv"),
+        name=base.get("name", ""),
     )
 
 
@@ -94,6 +95,16 @@ class Market:
         if len(snaps) > 1 and snaps[1].liquidity_usd * 10 > snaps[0].liquidity_usd:
             return None
         return snaps[0]
+
+    async def search_name(self, keyword: str) -> list[PairSnapshot]:
+        """Every coin on our chain whose search hit fits `keyword` (one snapshot per token)."""
+        r = await self.http.get(f"{DEX}/latest/dex/search", params={"q": keyword})
+        r.raise_for_status()
+        by_token: dict[str, list[dict]] = {}
+        for p in r.json().get("pairs") or []:
+            if p.get("chainId") == self.chain and (p.get("baseToken") or {}).get("address"):
+                by_token.setdefault(p["baseToken"]["address"], []).append(p)
+        return [s for s in (aggregate_pairs(v, self.chain) for v in by_token.values()) if s]
 
     async def prices(self, mints: list[str]) -> dict[str, float]:
         """Jupiter aggregated price (all routes) for up to 50 mints in one call."""

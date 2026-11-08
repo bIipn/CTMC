@@ -84,20 +84,26 @@ class SafetyChecker:
         r.raise_for_status()
         return r.json()
 
-    async def check(self, mint: str) -> Verdict:
+    async def check(self, mint: str, overrides: dict | None = None) -> Verdict:
+        """Fetch + evaluate + bubble map, with the base rules (or a profile's overrides)."""
         try:
             rep = await self.report(mint)
         except (httpx.HTTPError, ValueError) as exc:
             return Verdict(False, [f"rugcheck unavailable ({exc.__class__.__name__}) — fail closed"])
         self.last_report[mint] = rep
-        v = self.evaluate_solana(rep)
-        if not v or not self.clusters:
+        v = self.evaluate_solana(rep, overrides)
+        if not v:
             return v
-        cv = await self.clusters.analyze(rep.get("topHolders") or [], rep.get("creator"), known_pool_owners(rep))
+        cv = await self.clusters_check(rep)
         return Verdict(cv.ok, (v.reasons if cv.ok else []) + cv.reasons, v.score)
 
-    def evaluate_solana(self, rep: dict) -> Verdict:
-        r, why, notes = self.r, [], []
+    async def clusters_check(self, rep: dict) -> Verdict:
+        if not self.clusters:
+            return Verdict(True, [])
+        return await self.clusters.analyze(rep.get("topHolders") or [], rep.get("creator"), known_pool_owners(rep))
+
+    def evaluate_solana(self, rep: dict, overrides: dict | None = None) -> Verdict:
+        r, why, notes = {**self.r, **(overrides or {})}, [], []
         token = rep.get("token") or {}
 
         # ── authorities ──
@@ -131,10 +137,15 @@ class SafetyChecker:
 
         # ── liquidity lock ──
         markets = rep.get("markets") or []
-        if markets:
-            lp_pct = max(float((m.get("lp") or {}).get("lpLockedPct") or 0) for m in markets)
+        exempt = {str(t).replace("_", "").replace("-", "").lower() for t in r.get("lp_exempt_market_types", [])}
+        pools = [m for m in markets
+                 if str(m.get("marketType", "")).replace("_", "").replace("-", "").lower() not in exempt]
+        if pools:
+            lp_pct = max(float((m.get("lp") or {}).get("lpLockedPct") or 0) for m in pools)
             if lp_pct < r.get("min_lp_locked_or_burned_pct", 90):
                 why.append(f"only {lp_pct:.0f}% of LP locked/burned")
+        elif markets:
+            notes.append("still on a bonding curve (no LP that can be pulled)")
         else:
             why.append("no market / LP data")
 

@@ -73,7 +73,8 @@ def extract_coins(text: str) -> CoinMention:
 
 class CelebrityFilter:
     def __init__(self, celebrities: list[dict], rules: dict):
-        self.ids = {str(c["id"]): c["handle"] for c in celebrities}
+        self.ids = {str(c["id"]): c["handle"] for c in celebrities if c.get("id")}
+        self.unresolved = [c["handle"] for c in celebrities if not c.get("id")]
         self.max_age = rules.get("max_tweet_age_seconds", 20)
         self.ignore_replies = rules.get("ignore_replies", True)
 
@@ -196,6 +197,28 @@ class WebhookSource:
         server = await asyncio.start_server(handle, host, self.port)
         async with server:
             await server.serve_forever()
+
+
+async def resolve_ids(celebrities: list[dict], http: httpx.AsyncClient | None = None) -> list[str]:
+    """Fill in missing numeric X user IDs from handles (needs X_BEARER_TOKEN). Returns still-missing handles."""
+    missing = [c for c in celebrities if not c.get("id")]
+    token = os.getenv("X_BEARER_TOKEN", "")
+    if not missing or not token:
+        return [c["handle"] for c in missing]
+    own = http is None
+    http = http or httpx.AsyncClient(timeout=10)
+    try:
+        r = await http.get("https://api.x.com/2/users/by", params={"usernames": ",".join(c["handle"] for c in missing)},
+                           headers={"Authorization": f"Bearer {token}"})
+        found = {u["username"].lower(): u["id"] for u in (r.json().get("data") or [])} if r.status_code == 200 else {}
+    except (httpx.HTTPError, ValueError):
+        found = {}
+    finally:
+        if own:
+            await http.aclose()
+    for c in missing:
+        c["id"] = found.get(c["handle"].lower(), "")
+    return [c["handle"] for c in missing if not c["id"]]
 
 
 def make_source(cfg: dict):

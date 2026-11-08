@@ -47,10 +47,18 @@ class FakeMarket:
 class FakeSafety:
     def __init__(self, ok=True, delay=0.0):
         self.ok, self.delay = ok, delay
+        self.last_report = {}
 
-    async def check(self, mint):
+    async def report(self, mint):
         await asyncio.sleep(self.delay)
+        return {"creator": None}
+
+    def evaluate_solana(self, rep, overrides=None):
+        self.overrides = overrides
         return Verdict(self.ok, [] if self.ok else ["mint authority NOT revoked"])
+
+    async def clusters_check(self, rep):
+        return Verdict(True, [])
 
 
 def trader(market=None, safety=None, cash=1000):
@@ -404,3 +412,219 @@ def test_rug_alert_dumps_the_position():
     run(t.on_tweet(elon_tweet()))
     run(t.on_rug_alert(MINT, "liquidity pulled: 80% removed in 3s"))
     assert MINT not in t.positions and "RUG ALERT" in t.events[-1].detail
+
+
+# ── smart money: KOL registry, scoring, tracking, decoding ───
+from ctmc.feeds.pumpportal import NewToken, parse_message  # noqa: E402
+from ctmc.kol.importer import parse_kol_page, parse_kol_slugs  # noqa: E402
+from ctmc.kol.registry import Kol, KolStats, Registry, parse_duration, parse_money  # noqa: E402
+from ctmc.kol.scorer import score_history  # noqa: E402
+from ctmc.kol.signals import SmartMoney  # noqa: E402
+from ctmc.kol.tracker import KolTrade, KolTracker, parse_wallet_trades  # noqa: E402
+from ctmc.signals.narrative import Narrative  # noqa: E402
+
+KR = CFG["kol"]
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def kol(name, wr=65, pnl=80_000, hold=1800, trades=300, role="kol", wallet=None):
+    return Kol(name, [wallet or f"W{name}"], role=role,
+               stats=KolStats(win_rate=wr, pnl_30d_usd=pnl, median_hold_s=hold, trades_7d=trades, closed_trades=120))
+
+
+def test_parsers_for_money_and_durations():
+    assert parse_money("+$72.3K") == 72_300 and parse_money("$-4,587") == -4587 and parse_money("$1.4M") == 1_400_000
+    assert parse_duration("16 s") == 16 and parse_duration("12 min") == 720 and parse_duration("4.2 h") == 15_120
+
+
+def test_kol_tiers_reward_results_and_followability_not_fame():
+    swing = kol("Swing", wr=68, pnl=150_000, hold=2 * 3600)
+    scalper = kol("Scalper", wr=72, pnl=380_000, hold=16, trades=21_000)      # great trader, 16 s holds
+    famous_loser = kol("Famous", wr=39, pnl=-57_000, hold=4 * 3600)           # big name, losing money
+    celeb = kol("Celeb", wr=0, pnl=0, hold=0, role="celebrity")
+    assert swing.tier(KR) == "A" and swing.weight(KR) > 0.5
+    assert scalper.tier(KR) == "unfollowable" and scalper.weight(KR) == 0
+    assert famous_loser.tier(KR) == "no edge" and famous_loser.weight(KR) == 0
+    assert celeb.tier(KR) == "CELEB" and celeb.weight(KR) == 1.0
+
+
+def test_importer_reads_wallet_and_stats_from_kol_page():
+    k = parse_kol_page((FIXTURES / "kolexplorer_kol.html").read_text(), "testkol")
+    assert k.wallets == ["TestWa11etAddress99999999999999999999999999"] and k.x_handle == "testkol"
+    assert k.stats.win_rate == 67.0 and k.stats.median_hold_s == 16 and k.stats.trades_7d == 21630
+    assert k.stats.pnl_30d_usd == 381_176 and k.stats.median_entry_mcap_usd == 8_500
+    assert k.tier(KR) == "unfollowable"
+    assert parse_kol_slugs('<a href="https://kolexplorer.com/kol/abc">x</a> kolexplorer.com/kol/d-e') == ["abc", "d-e"]
+
+
+def test_registry_roundtrip_and_merge(tmp_path):
+    reg = Registry(tmp_path / "kols.json")
+    reg.add(kol("Swing", wallet="W1"))
+    reg.add(Kol("swing", ["W2"], x_handle="swingx"))         # same KOL, second wallet
+    reg.save()
+    again = Registry(tmp_path / "kols.json").load()
+    k = again.kols["swing"]
+    assert k.wallets == ["W1", "W2"] and k.x_handle == "swingx" and again.by_wallet["W2"] is k
+
+
+def _helius_swap(ts, wallet, mint, tokens, sol):
+    """tokens > 0 = bought with `sol` SOL; tokens < 0 = sold for `sol` SOL."""
+    pool = "POOLACCOUNT"
+    if tokens > 0:
+        return {"timestamp": ts, "tokenTransfers": [{"mint": mint, "tokenAmount": tokens, "fromUserAccount": pool, "toUserAccount": wallet}],
+                "nativeTransfers": [{"amount": sol * 1e9, "fromUserAccount": wallet, "toUserAccount": pool}]}
+    return {"timestamp": ts, "tokenTransfers": [{"mint": mint, "tokenAmount": -tokens, "fromUserAccount": wallet, "toUserAccount": pool}],
+            "nativeTransfers": [{"amount": sol * 1e9, "fromUserAccount": pool, "toUserAccount": wallet}]}
+
+
+def test_onchain_scoring_win_rate_hold_and_flips():
+    W, now = "ME", 1_800_000_000
+    txs = [
+        _helius_swap(now, W, "A", 1000, 1.0), _helius_swap(now + 3600, W, "A", -1000, 3.0),      # +2 SOL, 1h hold
+        _helius_swap(now, W, "B", 500, 2.0), _helius_swap(now + 30, W, "B", -500, 1.0),          # -1 SOL, 30s flip
+        _helius_swap(now, W, "C", 800, 1.0), _helius_swap(now + 7200, W, "C", -800, 0.05),       # -95%: rug
+        _helius_swap(now, W, "D", 100, 1.0),                                                     # still open
+    ]
+    rep = score_history(txs, W, sol_price_usd=150)
+    s = rep.stats
+    assert s.closed_trades == 3 and s.win_rate == pytest.approx(33.3, abs=0.1)
+    assert s.pnl_30d_usd == pytest.approx((2 - 1 - 0.95) * 150)
+    assert s.profit_factor == pytest.approx(2 / 1.95, abs=0.01)
+    assert s.median_hold_s == 3600 and s.flip_rate == pytest.approx(1 / 3, abs=0.01)
+    assert s.rug_rate == pytest.approx(1 / 3, abs=0.01) and rep.open_positions == 1
+
+
+def _rpc_tx(wallet, mint, pre_tok, post_tok, pre_lamports, post_lamports, fee=5000):
+    return {"meta": {"err": None, "fee": fee, "preBalances": [pre_lamports], "postBalances": [post_lamports],
+                     "preTokenBalances": [{"owner": wallet, "mint": mint, "uiTokenAmount": {"uiAmount": pre_tok}}],
+                     "postTokenBalances": [{"owner": wallet, "mint": mint, "uiTokenAmount": {"uiAmount": post_tok}}]},
+            "transaction": {"message": {"accountKeys": [{"pubkey": wallet}]}}}
+
+
+def test_live_trade_parser_buys_sells_and_ignores_transfers():
+    buy = parse_wallet_trades(_rpc_tx("K", MINT, 0, 5000, 3e9, 2e9), "K")
+    assert buy == [{"mint": MINT, "side": "buy", "tokens": 5000, "sol": pytest.approx(0.999995), "before": 0, "after": 5000}]
+    sell = parse_wallet_trades(_rpc_tx("K", MINT, 5000, 1000, 2e9, 4e9), "K")
+    assert sell[0]["side"] == "sell" and sell[0]["tokens"] == 4000 and sell[0]["before"] == 5000
+    airdrop = parse_wallet_trades(_rpc_tx("K", MINT, 0, 5000, 3e9, 3e9 - 5000), "K")   # tokens in, no SOL out
+    assert airdrop == []
+
+
+def _smart(*kols, holds=None):
+    reg = Registry("/nonexistent/kols.json")
+    for k in kols:
+        reg.add(k)
+
+    async def on_trade(t):
+        pass
+    tr = KolTracker(reg, KR, on_trade)
+
+    async def fake_balances(mint, wallets):
+        for w in wallets:
+            if (holds or {}).get(w):
+                tr.holdings[mint][w] = holds[w]
+        return {}
+    tr.balances_of = fake_balances
+    return SmartMoney(reg, tr, KR)
+
+
+def _sell(sm, k, frac, held_s=600):
+    w = k.wallets[0]
+    sm.tracker.first_buy[(w, MINT)] = time.time() - held_s
+    before = 1000.0
+    return KolTrade(w, k, MINT, "sell", before * frac, 1.0, before, before * (1 - frac), "sig")
+
+
+def test_decoding_kol_sells():
+    a, b, scalper = kol("Alpha", hold=3600), kol("Beta", hold=3600), kol("Flip", hold=10, trades=20_000)
+    celeb = kol("Celeb", role="celebrity", wr=0, pnl=0, hold=0)
+    sm = _smart(a, b, scalper, celeb)
+    sm.opened(MINT, run(sm.confluence(MINT, live_check=False)))
+    sm.watch[MINT].holders.update({a.wallets[0]: a.weight(KR), b.wallets[0]: b.weight(KR)})
+
+    assert sm.decode_sell(_sell(sm, scalper, 1.0)).action == "ignore"                 # bots' exits mean nothing
+    assert sm.decode_sell(_sell(sm, a, 0.2, held_s=2400)).action == "ignore"          # small trim = profit taking
+    call = sm.decode_sell(_sell(sm, a, 1.0, held_s=300))                              # all out in 5 min vs usual 60
+    assert call.action == "trim" and "early" in call.reason
+    assert sm.decode_sell(_sell(sm, b, 1.0, held_s=4000)).action == "exit"            # both proven wallets gone
+    assert sm.decode_sell(_sell(sm, celeb, 0.3)).action == "urgent"
+
+
+def test_confluence_sizes_up_celebrity_entries():
+    a, b = kol("Alpha", hold=3600, wallet="WA"), kol("Beta", hold=3600, wallet="WB")
+    sm = _smart(a, b, holds={"WA": 10_000, "WB": 5_000})
+    t = trader()
+    t.smart = sm
+    run(t.on_tweet(elon_tweet()))
+    buy = [e for e in t.events if e.kind == "BUY"][0]
+    mult = sm.size_multiplier(run(sm.confluence(MINT)))
+    assert mult > 1.5 and "2 smart wallets in" in buy.detail
+    assert t.positions[MINT].cost_usd == pytest.approx(100 * mult)
+
+
+def test_kol_sell_signals_trim_then_exit_a_held_position():
+    a, b = kol("Alpha", hold=3600, wallet="WA"), kol("Beta", hold=3600, wallet="WB")
+    sm = _smart(a, b, holds={"WA": 1000, "WB": 1000})
+    t = trader(market=FakeMarket(snap(liq=1e12)))
+    t.smart = sm
+    run(t.on_tweet(elon_tweet()))
+    qty0 = t.positions[MINT].qty
+    run(t.on_kol_trade(_sell(sm, a, 1.0, held_s=120)))          # strong wallet bails very early
+    assert t.positions[MINT].qty == pytest.approx(qty0 / 2)
+    run(t.on_kol_trade(_sell(sm, b, 1.0, held_s=4000)))         # the rest of the smart money leaves
+    assert MINT not in t.positions and "smart money" in t.events[-1].detail
+
+
+def test_celebrity_wallet_buy_triggers_entry():
+    celeb = kol("Tate", role="celebrity", wr=0, pnl=0, hold=0, wallet="WTATE")
+    sm = _smart(celeb)
+    t = trader()
+    t.smart = sm
+    run(t.on_kol_trade(KolTrade("WTATE", celeb, MINT, "buy", 1e6, 50, 0, 1e6, "sig")))
+    assert MINT in t.positions and "Tate's own wallet bought it" in t.positions[MINT].source
+
+
+# ── early profile & narrative radar ──────────────────────────
+def test_small_caps_use_early_rules_and_smaller_bets():
+    s = snap(liq=200_000)
+    s.market_cap = 400_000                                     # under $1.5M: early profile
+    safety = FakeSafety()
+    t = trader(market=FakeMarket(s), safety=safety)
+    run(t.on_tweet(elon_tweet()))
+    pos = t.positions[MINT]
+    assert pos.profile == "early" and pos.cost_usd == pytest.approx(40)       # 4% instead of 10%
+    assert safety.overrides["min_holders"] == 40 and "pump_fun" in safety.overrides["lp_exempt_market_types"]
+
+
+def test_bonding_curve_is_exempt_from_lp_lock_check():
+    rep = _clean_report(markets=[{"marketType": "pump_fun", "pubkey": "POOL", "lp": {"lpLockedPct": 0}}])
+    early = CFG["profiles"]["early"]
+    v = SafetyChecker(CFG["safety"]).evaluate_solana(rep, {"lp_exempt_market_types": early["lp_exempt_market_types"]})
+    assert v.ok and "bonding curve" in " ".join(v.reasons)
+    assert not SafetyChecker(CFG["safety"]).evaluate_solana(rep).ok                # main rules: still rejected
+
+
+def test_narrative_coin_needs_smart_money_before_buying():
+    a, b, c = (kol(n, hold=3600, wallet=f"W{n}") for n in ("A1", "B1", "C1"))
+    sm = _smart(a, b, c)
+    t = trader()
+    t.smart, t.narrative = sm, Narrative(CFG["celebrities"], CFG["narrative"])
+    t.cfg = dict(CFG, celebrities=CFG["celebrities"])
+    tate = next(x for x in CFG["celebrities"] if x["handle"] == "Cobratate")
+    t.narrative.on_tweet(tate["handle"], "Escape the Matrix. Top G.")
+    run(t.on_new_token(NewToken(MINT, "Top G", "TOPG", "dev", 30, time.time())))
+    assert MINT in t.narrative.radar and t.events[-1].kind == "RADAR"
+    for k in (a, b):
+        run(sm.tracker.record(KolTrade(k.wallets[0], k, MINT, "buy", 1000, 1, 0, 1000, "s")))
+        run(t.on_kol_trade(sm.tracker.recent[-1]))
+    assert MINT not in t.positions                              # 2 wallets: not a cluster yet
+    run(sm.tracker.record(KolTrade(c.wallets[0], c, MINT, "buy", 1000, 1, 0, 1000, "s")))
+    run(t.on_kol_trade(sm.tracker.recent[-1]))
+    assert MINT in t.positions and "'topg' narrative + 3 smart wallets" in t.positions[MINT].source
+
+
+def test_pumpportal_messages():
+    kind, tok = parse_message({"txType": "create", "mint": MINT, "name": "Top G", "symbol": "TOPG",
+                               "traderPublicKey": "dev", "marketCapSol": 28.5})
+    assert kind == "new" and tok.symbol == "TOPG" and tok.market_cap_sol == 28.5
+    assert parse_message({"txType": "buy", "mint": MINT}) is None
