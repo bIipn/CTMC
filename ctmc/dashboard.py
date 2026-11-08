@@ -9,8 +9,8 @@ from rich.table import Table
 from rich.text import Text
 
 ACCENT = "bright_cyan"
-KIND_STYLE = {"BUY": "bold green", "SELL": "bold magenta", "SKIP": "grey50",
-              "HALT": "bold red", "TWEET": "bold bright_cyan"}
+KIND_STYLE = {"BUY": "bold green", "SELL": "bold magenta", "SKIP": "grey50", "HALT": "bold red",
+              "TWEET": "bold bright_cyan", "KOL": "bold yellow", "RADAR": "cyan"}
 
 
 def _money(v: float) -> Text:
@@ -33,8 +33,11 @@ def render(t, mode: str, feeds: str = "") -> Group:
         (f"${t.broker.cash:,.2f}", "white"), "   leaders ",
         (f"{lead} {chg:+.2f}%", "red" if chg < -1 else "green"),
         ("   ■ HALTED" if t.halted else "", "bold red"),
+        ("   ■ PAUSED" if t.protect and t.protect.halted() else "", "bold red"),
     )
-    sub = Text(f"  watching {len(t.celebs.ids)} celebrities · {feeds}", style="grey50")
+    radar = len(t.narrative.radar) if t.narrative else 0
+    sub = Text(f"  watching {len(t.celebs.ids)} celebrities · {feeds}" + (f" · {radar} on narrative radar" if radar else ""),
+               style="grey50")
 
     pos = Table(expand=True, box=None, header_style=f"bold {ACCENT}", pad_edge=False)
     for col in ("Coin", "Entry", "Now", "x", "Bag", "Banked", "Stage", "Pools", "Why"):

@@ -39,6 +39,10 @@ leaders:
   WIF:      EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm
   FARTCOIN: 9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump
 
+leader_feed:                 # real-time leader prices (Binance websockets, free). Others fall back to Jupiter.
+  binance: true
+  symbols: { SOL: "spot:SOLUSDT", WIF: "spot:WIFUSDT" }   # add FARTCOIN: "futures:FARTCOINUSDT" if listed
+
 leader_guard:
   enabled: true
   window_minutes: 5

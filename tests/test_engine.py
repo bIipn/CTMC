@@ -839,3 +839,12 @@ def test_telegram_commands(store, tmp_path):
     assert "resumed" in run(tc.handle("/resume")) and not t.protect.halted()
     assert "selling MEME" in run(tc.handle("/sell $meme")) and MINT not in t.positions
     assert run(tc.handle("/profit")) == "summary"
+
+
+def test_binance_book_ticker_parsing():
+    from ctmc.feeds.cex import BinanceLeaders, parse_book_ticker
+    msg = {"stream": "solusdt@bookTicker", "data": {"s": "SOLUSDT", "b": "89.40", "a": "89.42"}}
+    assert parse_book_ticker(msg) == ("SOLUSDT", pytest.approx(89.41))
+    assert parse_book_ticker({"data": {"s": "X"}}) is None
+    b = BinanceLeaders({"SOL": "spot:SOLUSDT", "FARTCOIN": "futures:FARTCOINUSDT"}, None)
+    assert b.by_market == {"spot": {"SOLUSDT": "SOL"}, "futures": {"FARTCOINUSDT": "FARTCOIN"}}

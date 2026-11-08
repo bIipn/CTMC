@@ -15,6 +15,7 @@ from ctmc.protections import Protections
 from ctmc.signals.postbuy import PostBuyReview
 from ctmc.storage import Store
 from ctmc.data.market import Market, PriceFeed
+from ctmc.feeds.cex import BinanceLeaders
 from ctmc.feeds.pumpportal import PumpPortalStream
 from ctmc.feeds.twitter import WebhookSource, make_source, resolve_ids
 from ctmc.kol.registry import Registry
@@ -73,7 +74,12 @@ async def run(cfg, live: bool, console: Console) -> None:
             tasks_extra.append(("pump.fun launches", stream.run))
 
     feed = PriceFeed(market, cfg.monitor["price_refresh_seconds"])
-    feed.watch.update(cfg.leaders.values())
+    cex = dict(cfg["leader_feed"].get("symbols") or {}) if cfg["leader_feed"].get("binance") else {}
+    feed.watch.update(mint for name, mint in cfg.leaders.items() if name not in cex)   # Jupiter covers the rest
+    if cex:
+        async def leader_tick(name: str, px: float) -> None:
+            await trader.on_price(cfg.leaders[name], px)
+        tasks_extra.append(("binance leaders", BinanceLeaders(cex, leader_tick).run))
     trader.on_watch = feed.watch.add
     trader.on_unwatch = feed.watch.discard
     await restore(trader, store, broker, live)
