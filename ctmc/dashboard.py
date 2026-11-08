@@ -36,8 +36,9 @@ def render(t, mode: str, feeds: str = "") -> Group:
         ("   ■ PAUSED" if t.protect and t.protect.halted() else "", "bold red"),
     )
     radar = len(t.narrative.radar) if t.narrative else 0
-    sub = Text(f"  watching {len(t.celebs.ids)} celebrities · {feeds}" + (f" · {radar} on narrative radar" if radar else ""),
-               style="grey50")
+    need = len(t.celebs.unresolved)
+    sub = Text(f"  watching {len(t.celebs.ids)} X accounts" + (f" ({need} more need IDs — set X_BEARER_TOKEN)" if need else "")
+               + f" · {feeds}" + (f" · {radar} on narrative radar" if radar else ""), style="grey50")
 
     pos = Table(expand=True, box=None, header_style=f"bold {ACCENT}", pad_edge=False)
     for col in ("Coin", "Entry", "Now", "x", "Bag", "Banked", "Stage", "Pools", "Why"):
