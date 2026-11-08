@@ -41,7 +41,8 @@ async def run(cfg, live: bool, console: Console) -> None:
         from ctmc.execution.broker import PaperBroker
         broker = PaperBroker(store.get("cash", cfg.bankroll["starting_usd"]), cfg["execution"])
 
-    unresolved = await resolve_ids(cfg["celebrities"], http)       # fill missing X user IDs
+    id_notes: list[str] = []
+    unresolved = await resolve_ids(cfg["celebrities"], http, id_notes.append)   # fill + verify X user IDs
     hype = HypeChecker(cfg["hype"], http)
     trader = Trader(cfg, broker, market, SafetyChecker(cfg["safety"], cfg["clusters"], http), hype)
     trader.ready = False                                           # no buys until saved state is reconciled
@@ -49,8 +50,12 @@ async def run(cfg, live: bool, console: Console) -> None:
     trader.postbuy = PostBuyReview(cfg["postbuy"], store, hype, http)
     notifier = Notifier(cfg["notify"], http)
     trader.notifier = notifier
-    for handle in unresolved:
-        trader.log("HALT", f"@{handle}", "no X user ID — their tweets can't be verified, so they're ignored")
+    for note in id_notes:
+        trader.log("KOL", "-", note)
+    if unresolved:
+        trader.log("HALT", "-", f"{len(unresolved)} celebrities have no X user ID yet (set X_BEARER_TOKEN to look them up, "
+                                f"or fill celebrities.yaml): {', '.join('@' + h for h in unresolved[:8])}"
+                                + (" …" if len(unresolved) > 8 else ""))
 
     tasks_extra: list = []
     if cfg["rugwatch"].get("enabled", True):

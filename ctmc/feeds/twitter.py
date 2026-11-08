@@ -122,6 +122,21 @@ def tweet_from_v2(payload: dict) -> Tweet | None:
 OnTweet = Callable[[Tweet], Awaitable[None]]
 
 
+def build_rules(handles: list[str], max_len: int = 512) -> list[str]:
+    """'(from:a OR from:b ...) -is:retweet' rules, each within X's rule-length limit."""
+    rules, cur = [], []
+    for h in handles:
+        trial = "(" + " OR ".join(f"from:{x}" for x in cur + [h]) + ") -is:retweet"
+        if cur and len(trial) > max_len:
+            rules.append("(" + " OR ".join(f"from:{x}" for x in cur) + ") -is:retweet")
+            cur = [h]
+        else:
+            cur.append(h)
+    if cur:
+        rules.append("(" + " OR ".join(f"from:{x}" for x in cur) + ") -is:retweet")
+    return rules
+
+
 class XFilteredStream:
     """Official X API v2 filtered stream."""
 
@@ -135,17 +150,17 @@ class XFilteredStream:
         return {"Authorization": f"Bearer {self.token}"}
 
     async def sync_rules(self, http: httpx.AsyncClient) -> None:
-        """One rule: posts from any watched celebrity (originals + quotes)."""
-        want = "(" + " OR ".join(f"from:{h}" for h in self.handles) + ") -is:retweet"
+        """Posts from every watched celebrity, split into as many rules as X's length limit needs."""
+        want = build_rules(self.handles)
         r = await http.get(f"{self.BASE}/rules", headers=self._headers())
         existing = (r.json().get("data") or []) if r.status_code == 200 else []
-        if any(x.get("value") == want for x in existing):
+        if sorted(x.get("value") for x in existing) == sorted(want):
             return
         if existing:
             await http.post(f"{self.BASE}/rules", headers=self._headers(),
                             json={"delete": {"ids": [x["id"] for x in existing]}})
         await http.post(f"{self.BASE}/rules", headers=self._headers(),
-                        json={"add": [{"value": want, "tag": "ctmc-celebs"}]})
+                        json={"add": [{"value": v, "tag": f"ctmc-celebs-{i}"} for i, v in enumerate(want)]})
 
     async def run(self, on_tweet: OnTweet) -> None:
         if not self.token:
@@ -207,26 +222,36 @@ class WebhookSource:
             await server.serve_forever()
 
 
-async def resolve_ids(celebrities: list[dict], http: httpx.AsyncClient | None = None) -> list[str]:
-    """Fill in missing numeric X user IDs from handles (needs X_BEARER_TOKEN). Returns still-missing handles."""
-    missing = [c for c in celebrities if not c.get("id")]
+async def resolve_ids(celebrities: list[dict], http: httpx.AsyncClient | None = None,
+                      log=lambda msg: None) -> list[str]:
+    """Look up every handle on X (needs X_BEARER_TOKEN): fill missing IDs and CORRECT wrong ones,
+    so a typo can never silently mute a celebrity. Returns handles still without an ID."""
     token = os.getenv("X_BEARER_TOKEN", "")
-    if not missing or not token:
-        return [c["handle"] for c in missing]
+    if not token or not celebrities:
+        return [c["handle"] for c in celebrities if not c.get("id")]
     own = http is None
     http = http or httpx.AsyncClient(timeout=10)
+    found: dict[str, str] = {}
     try:
-        r = await http.get("https://api.x.com/2/users/by", params={"usernames": ",".join(c["handle"] for c in missing)},
-                           headers={"Authorization": f"Bearer {token}"})
-        found = {u["username"].lower(): u["id"] for u in (r.json().get("data") or [])} if r.status_code == 200 else {}
-    except (httpx.HTTPError, ValueError):
-        found = {}
+        for i in range(0, len(celebrities), 100):                  # X allows 100 usernames per call
+            batch = ",".join(c["handle"] for c in celebrities[i:i + 100])
+            try:
+                r = await http.get("https://api.x.com/2/users/by", params={"usernames": batch},
+                                   headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 200:
+                    found.update({u["username"].lower(): u["id"] for u in (r.json().get("data") or [])})
+            except (httpx.HTTPError, ValueError):
+                continue
     finally:
         if own:
             await http.aclose()
-    for c in missing:
-        c["id"] = found.get(c["handle"].lower(), "")
-    return [c["handle"] for c in missing if not c["id"]]
+    for c in celebrities:
+        real = found.get(c["handle"].lower())
+        if real and str(c.get("id") or "") not in ("", real):
+            log(f"@{c['handle']}: configured id {c['id']} was wrong — corrected to {real}")
+        if real:
+            c["id"] = real
+    return [c["handle"] for c in celebrities if not c.get("id")]
 
 
 def make_source(cfg: dict):

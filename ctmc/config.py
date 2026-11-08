@@ -20,4 +20,9 @@ class Cfg(dict):
 
 def load(path: str | Path = "config.yaml") -> Cfg:
     with open(path, encoding="utf-8") as fh:
-        return Cfg(yaml.safe_load(fh))
+        cfg = yaml.safe_load(fh)
+    celebs = cfg.get("celebrities")
+    if isinstance(celebs, str):                       # a separate file of watched accounts
+        with open(Path(path).parent / celebs, encoding="utf-8") as fh:
+            cfg["celebrities"] = yaml.safe_load(fh) or []
+    return Cfg(cfg)

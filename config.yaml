@@ -11,20 +11,14 @@ bankroll:
   max_open_positions: 4
   risk_per_trade_pct: 10     # % of equity per celebrity entry
   reserve_pct: 30            # never deploy this slice of equity
+  max_position_pct: 15       # hard cap per position (also the ceiling when raising size to beat fees)
   daily_loss_limit_pct: 15
 
 # ── Who can trigger a buy ─────────────────────────────────────
 # Use the numeric X user ID (never just the handle): handles can be
 # changed or impersonated, the ID can't. Find an ID at tweeterid.com.
-# keywords: names a narrative coin would use (their name, nicknames, catchphrases).
-# Leave id "" to have it looked up from X at startup (needs X_BEARER_TOKEN).
-celebrities:
-  - { handle: elonmusk,        id: "44196397",           keywords: [elon, musk, doge, kekius, xai, grok] }
-  - { handle: realDonaldTrump, id: "25073877",           keywords: [trump, maga, melania, barron] }
-  - { handle: cz_binance,      id: "902926941413453824", keywords: [binance, bnb] }
-  - { handle: saylor,          id: "244647486",          keywords: [saylor] }
-  - { handle: Cobratate,       id: "",                   keywords: [tate, topg, cobra, tristan, hustlers] }
-  # - { handle: someone,       id: "123...",             keywords: [nickname, catchphrase] }
+# Who can trigger a buy lives in its own file — 40+ accounts, add freely.
+celebrities: celebrities.yaml
 
 twitter:
   source: x_stream           # x_stream (official X API filtered stream) | webhook (any alert service POSTs to us)
@@ -167,7 +161,10 @@ checks:
   timeout_seconds: 4         # all checks run in parallel; anything slower = no trade
   round_trip: true           # quote buy -> sell before buying: catches honeypots and hidden taxes
   round_trip_usd: 50
-  max_round_trip_cost_pct: 15
+  max_round_trip_cost_pct: 8  # buying and selling straight back may cost at most 8% (fees + impact + taxes)
+  max_total_cost_pct: 8      # fees + slippage over a trade's life may eat at most 8% of the position
+  expected_transactions: 4   # buy + cost-out + ~2 more sells, for the fee estimate
+  assumed_round_trip_pct: 3  # used when the round-trip quote isn't available
   late_pump_pct_1h: 300      # already up 300%+ this hour -> half size
   very_late_pump_pct_1h: 1000  # up 1000%+ -> quarter size
 
@@ -191,7 +188,9 @@ protections:                 # the brakes (all survive restarts)
 
 # ── Exits ─────────────────────────────────────────────────────
 exits:
-  take_initial_at_multiple: 2.0      # at 2x: sell exactly what you put in. Rest is free.
+  take_initial_at_multiple: 2.0      # at 2x: sell your stake + all fees paid. Rest is truly free.
+  est_sell_fee_usd: 0.20             # the cost-out sale's own fee, recovered too
+  min_sell_usd: 4                    # a ladder half worth less than this isn't worth the fee: skip that rung
   ladder: [10, 30, 50, 100]          # at each multiple: sell half of what is left
   ladder_sell_fraction: 0.5
   after_ladder_every_x: 2.0          # past 100x: halve again at 200x, 400x, ...
@@ -220,7 +219,8 @@ execution:
   buy_slippage_bps: 300        # 3%
   sell_slippage_bps: 500       # 5% normally ...
   panic_sell_slippage_bps: [800, 1500, 2500]   # ... escalating retries when we MUST get out
-  paper_fee_pct: 0.3
+  paper_fee_pct: 0.3          # pool fee in paper fills (price impact is modelled separately)
+  network_fee_usd: 0.20        # base + priority fee per transaction (paper fills + the cost gate)
   min_sol_reserve: 0.1         # always keep this much SOL for fees; buys stop below it
   max_entry_drift_pct: 25      # chase guard: price ran more than this since the checks -> no buy
   max_priority_fee_lamports: 3000000

@@ -21,6 +21,7 @@ class Sell:
     closes: bool = False
     rung: float | None = None      # ladder multiple this sell belongs to
     initial: bool = False          # the 2x cost-basis sell
+    skip: bool = False             # rung reached but the sale would be too small to be worth the fee
 
 
 def next_rungs(rules: dict, hits: list[float]) -> list[float]:
@@ -43,8 +44,10 @@ def ladder_sells(pos: Position, price: float, rules: dict) -> list[Sell]:
     qty_left = pos.qty
 
     if not pos.initial_taken and m >= rules.get("take_initial_at_multiple", 2.0):
-        q = min(qty_left, pos.cost_usd / price)
-        out.append(Sell(q, f"{m:.1f}x — initial ${pos.cost_usd:,.0f} pulled out, rest rides free", initial=True))
+        # recover the stake AND every fee paid so far (plus this sale's), so the rest really is free
+        need = pos.cost_usd + getattr(pos, "fees_usd", 0.0) + rules.get("est_sell_fee_usd", 0.0)
+        q = min(qty_left, need / price)
+        out.append(Sell(q, f"{m:.1f}x — initial ${pos.cost_usd:,.0f} + fees pulled out, rest rides free", initial=True))
         qty_left -= q
 
     frac = rules.get("ladder_sell_fraction", 0.5)
@@ -52,6 +55,10 @@ def ladder_sells(pos: Position, price: float, rules: dict) -> list[Sell]:
         if m < rung or qty_left <= 0:
             break
         q = qty_left * frac
+        if q * price < rules.get("min_sell_usd", 0):
+            out.append(Sell(0, f"hit {rung:g}x — half the bag is under ${rules['min_sell_usd']:g}, not worth the fee",
+                            rung=rung, skip=True))
+            continue
         out.append(Sell(q, f"hit {rung:g}x — sold half of the bag", rung=rung))
         qty_left -= q
 

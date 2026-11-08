@@ -41,6 +41,7 @@ class Fill:
     signature: str = ""
     quoted_usd: float = 0.0       # what the quote promised (for realized-vs-quoted slippage)
     confirm_ms: float = 0.0       # send -> confirmed
+    fee_usd: float = 0.0          # network + priority + tip fees paid for this transaction
 
 
 class TradeError(RuntimeError):
@@ -68,6 +69,7 @@ class PaperBroker:
     def __init__(self, cash: float, ex: dict):
         self.cash = cash
         self.fee = ex.get("paper_fee_pct", 0.3) / 100
+        self.net_fee = ex.get("network_fee_usd", 0.20)        # priority + base fee per transaction
         self.max_impact = ex.get("max_price_impact_pct", 3)
 
     async def buy(self, token: str, usd: float, price: float, liquidity_usd: float) -> Fill:
@@ -76,15 +78,15 @@ class PaperBroker:
             raise TradeError("pool too thin for the impact cap")
         impact = amm_impact(usd, liquidity_usd)
         fill_price = price / (1 - impact) * (1 + self.fee)
-        self.cash -= usd
-        return Fill(usd / fill_price, usd, fill_price, impact * 100)
+        self.cash -= usd + self.net_fee
+        return Fill(usd / fill_price, usd, fill_price, impact * 100, fee_usd=self.net_fee)
 
     async def sell(self, token: str, qty: float, price: float, liquidity_usd: float, urgent: bool = False) -> Fill:
         impact = amm_impact(qty * price, liquidity_usd)
         fill_price = price * (1 - impact) * (1 - self.fee)
         usd = qty * fill_price
-        self.cash += usd
-        return Fill(-qty, -usd, fill_price, impact * 100)
+        self.cash += usd - self.net_fee
+        return Fill(-qty, -usd, fill_price, impact * 100, fee_usd=self.net_fee)
 
 
 def slippage_error(err) -> bool:
@@ -118,6 +120,7 @@ class JupiterBroker:
         self.store = store                    # ctmc.storage.Store: intents are written before sending
         self.cash = 0.0
         self.sol = 0.0
+        self.sol_usd = 150.0                  # kept current from the SOL leader feed (for fee accounting)
         self._decimals: dict[str, int] = {USDC: 6}
 
     async def start(self) -> None:
@@ -235,6 +238,11 @@ class JupiterBroker:
             if intent is not None:
                 self.store.set_fill_status(intent, result.lower())
 
+    def fee_usd(self, meta: dict) -> float:
+        """What this transaction cost in network fees: base + priority (meta.fee) + any Jito tip."""
+        lamports = int(meta.get("fee") or 0) + int(self.ex.get("jito_tip_lamports") or 0)
+        return lamports / 1e9 * self.sol_usd
+
     # ── broker API ──────────────────────────────────────────
     async def buy(self, token: str, usd: float, price: float, liquidity_usd: float) -> Fill:
         if self.ex.get("min_sol_reserve", 0.1) and await self.sol_balance() < self.ex.get("min_sol_reserve", 0.1):
@@ -259,7 +267,8 @@ class JupiterBroker:
         got = balance_delta(meta, self.wallet, token) or quoted_tokens
         spent = -balance_delta(meta, self.wallet, USDC) or usd
         self.cash -= spent
-        return Fill(got, spent, spent / got, impact, sig, quoted_usd=usd, confirm_ms=meta.get("_confirm_ms", 0))
+        return Fill(got, spent, spent / got, impact, sig, quoted_usd=usd, confirm_ms=meta.get("_confirm_ms", 0),
+                    fee_usd=self.fee_usd(meta))
 
     async def sell(self, token: str, qty: float, price: float, liquidity_usd: float, urgent: bool = False) -> Fill:
         held = await self.token_balance(token)
@@ -285,7 +294,8 @@ class JupiterBroker:
                 sold = -balance_delta(meta, self.wallet, token) or qty
                 self.cash += usd
                 return Fill(-sold, -usd, usd / sold, float(quote.get("priceImpactPct") or 0) * 100, sig,
-                            quoted_usd=int(quote["outAmount"]) / 1e6, confirm_ms=meta.get("_confirm_ms", 0))
+                            quoted_usd=int(quote["outAmount"]) / 1e6, confirm_ms=meta.get("_confirm_ms", 0),
+                            fee_usd=self.fee_usd(meta))
             if status == "FAILED" and slippage_error(meta.get("err")):
                 i += 1                                     # landed and failed on slippage: widen
                 continue

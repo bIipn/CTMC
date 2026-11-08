@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS positions (
   opened_at REAL, peak_price REAL, initial_taken INTEGER, realized_usd REAL,
   ladder_hits TEXT, source TEXT, profile TEXT, signal TEXT, low_volume_streak INTEGER,
   status TEXT DEFAULT 'open', closed_at REAL, exit_reason TEXT, exit_code TEXT,
-  pnl_usd REAL, peak_multiple REAL, exit_multiple REAL, hit_2x INTEGER, entry_latency_s REAL);
+  pnl_usd REAL, peak_multiple REAL, exit_multiple REAL, hit_2x INTEGER, entry_latency_s REAL,
+  fees_usd REAL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS fills (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, token TEXT, symbol TEXT, side TEXT,
   qty REAL, usd REAL, price REAL, impact_pct REAL, signature TEXT, reason TEXT, status TEXT);
@@ -65,6 +66,10 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
+        try:                                              # older journals: add the fees column
+            self.db.execute("ALTER TABLE positions ADD COLUMN fees_usd REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
 
     @classmethod
     def for_mode(cls, mode: str, folder: str = "data") -> "Store":
@@ -74,26 +79,28 @@ class Store:
     def save_position(self, p: Position) -> None:
         self.db.execute(
             """INSERT INTO positions (token, symbol, entry_price, qty, cost_usd, opened_at, peak_price, initial_taken,
-                 realized_usd, ladder_hits, source, profile, signal, low_volume_streak, status, entry_latency_s)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?)
+                 realized_usd, ladder_hits, source, profile, signal, low_volume_streak, status, entry_latency_s, fees_usd)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?)
                ON CONFLICT(token) DO UPDATE SET symbol=excluded.symbol, entry_price=excluded.entry_price,
                  qty=excluded.qty, cost_usd=excluded.cost_usd, peak_price=excluded.peak_price,
                  initial_taken=excluded.initial_taken, realized_usd=excluded.realized_usd,
-                 ladder_hits=excluded.ladder_hits, low_volume_streak=excluded.low_volume_streak, status='open'""",
+                 ladder_hits=excluded.ladder_hits, low_volume_streak=excluded.low_volume_streak, status='open',
+                 fees_usd=excluded.fees_usd""",
             (p.token, p.symbol, p.entry_price, p.qty, p.cost_usd, p.opened_at, p.peak_price, int(p.initial_taken),
              p.realized_usd, json.dumps(p.ladder_hits), p.source, p.profile, getattr(p, "signal", ""),
-             p.low_volume_streak, getattr(p, "entry_latency_s", None)))
+             p.low_volume_streak, getattr(p, "entry_latency_s", None), getattr(p, "fees_usd", 0.0)))
 
     def close_position(self, p: Position, reason: str) -> None:
         peak = p.peak_price / p.entry_price if p.entry_price else 0
-        exit_mult = p.realized_usd / p.cost_usd if p.cost_usd else 0
+        fees = getattr(p, "fees_usd", 0.0)
+        exit_mult = (p.realized_usd - fees) / p.cost_usd if p.cost_usd else 0          # net of fees
         self.db.execute(
             """UPDATE positions SET status='closed', closed_at=?, exit_reason=?, exit_code=?, pnl_usd=?, qty=0,
                  realized_usd=?, peak_price=?, peak_multiple=?, exit_multiple=?, hit_2x=?, ladder_hits=?,
-                 initial_taken=? WHERE token=?""",
-            (time.time(), reason, exit_code(reason), p.realized_usd - p.cost_usd, p.realized_usd, p.peak_price,
+                 initial_taken=?, fees_usd=? WHERE token=?""",
+            (time.time(), reason, exit_code(reason), p.realized_usd - p.cost_usd - fees, p.realized_usd, p.peak_price,
              peak, exit_mult, int(p.initial_taken or peak >= 2), json.dumps(p.ladder_hits), int(p.initial_taken),
-             p.token))
+             fees, p.token))
 
     def open_positions(self) -> list[Position]:
         out = []
@@ -103,6 +110,7 @@ class Store:
                          realized_usd=r["realized_usd"], ladder_hits=json.loads(r["ladder_hits"] or "[]"),
                          source=r["source"] or "", low_volume_streak=r["low_volume_streak"] or 0)
             p.profile, p.signal = r["profile"] or "", r["signal"] or ""
+            p.fees_usd = r["fees_usd"] or 0.0
             out.append(p)
         return out
 

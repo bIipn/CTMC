@@ -76,6 +76,7 @@ class Position:
     profile: str = ""             # "early" | "established"
     signal: str = ""              # who/what triggered it: "@elonmusk", "narrative:@Cobratate", ...
     entry_latency_s: float | None = None   # tweet -> fill
+    fees_usd: float = 0.0         # network fees paid so far (pool fees + slippage are already in the fills)
     low_volume_streak: int = 0
 
     def __post_init__(self) -> None:

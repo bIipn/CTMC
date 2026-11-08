@@ -66,6 +66,7 @@ class Trader:
         self.lock = asyncio.Lock()
         self._buying: set[str] = set()                    # mints with a buy in flight
         self._last_tick: dict[str, float] = {}            # mint -> last recorded price-path point
+        self._trip: dict[str, float | None] = {}          # mint -> measured buy+sell round-trip cost
         self.on_watch = lambda mint: None                 # wired to the price feed by the runner
         self.on_unwatch = lambda mint: None
 
@@ -242,6 +243,7 @@ class Trader:
         u = self.passes_universe(snap, prof.get("universe"))
         if not u:
             return u, snap, conf, name
+        self._trip[mint] = trip if isinstance(trip, float) else None
         max_trip = self.cfg["checks"].get("max_round_trip_cost_pct", 15)
         if isinstance(trip, Exception):
             return Verdict(False, [f"no sell route on Jupiter — possible honeypot ({trip.__class__.__name__})"]), snap, conf, name
@@ -277,6 +279,25 @@ class Trader:
         if s.market_cap and ratio > u.get("max_mcap_to_liquidity", float("inf")):
             why.append(f"market cap is {ratio:.0f}x its liquidity — too thin to exit")
         return Verdict(not why, why)
+
+    def cost_viable_size(self, size: float, trip: float | None, equity: float) -> tuple[float, str]:
+        """Fees + slippage must not eat the trade. Fixed network fees hurt small positions most:
+        cost% = (fee per tx x expected txs) / size + round-trip slippage%. Too high -> raise the size
+        (within the max position cap and free cash) or skip."""
+        c, ex, b = self.cfg["checks"], self.cfg["execution"], self.cfg["bankroll"]
+        fixed = ex.get("network_fee_usd", 0.20) * c.get("expected_transactions", 4)
+        rt = trip if trip is not None else c.get("assumed_round_trip_pct", 3) / 100
+        cap = c.get("max_total_cost_pct", 8) / 100
+        if rt >= cap:
+            return 0.0, f"slippage alone costs {rt:.1%} round trip — over the {cap:.0%} cost cap"
+        if fixed / size + rt <= cap:
+            return size, ""
+        need = fixed / (cap - rt)
+        room = min(equity * b.get("max_position_pct", 15) / 100,
+                   self.broker.cash - equity * b["reserve_pct"] / 100)
+        if need <= room:
+            return need, f"raised to ${need:,.0f} so fees + slippage stay under {cap:.0%}"
+        return 0.0, f"fees + slippage would eat {fixed / size + rt:.0%} of a ${size:,.0f} position — skipped"
 
     def lateness_scale(self, s: PairSnapshot) -> tuple[float, str]:
         """Already pumped hard before we saw it? Bet smaller — the easy money may be gone."""
@@ -329,6 +350,10 @@ class Trader:
                 if size < 5:
                     self.log("SKIP", sym, "no free cash outside the reserve")
                     return
+                size, cost_note = self.cost_viable_size(size, self._trip.get(mint), equity)
+                if size <= 0:
+                    self.log("SKIP", sym, cost_note)
+                    return
                 try:
                     fill = await self.broker.buy(mint, size, snap.price_usd, snap.liquidity_usd)
                 except TradeError as exc:
@@ -336,6 +361,7 @@ class Trader:
                     return
                 pos = Position(mint, sym, fill.price, fill.qty, fill.usd, source=reason)
                 pos.profile, pos.signal = profile, signal
+                pos.fees_usd = getattr(fill, "fee_usd", 0.0)
                 pos.entry_latency_s = round(time.time() - tweet.created_at, 2) if tweet else None
                 self.positions[mint] = pos
                 self.last_px[mint] = snap.price_usd
@@ -349,7 +375,7 @@ class Trader:
         lag = f" · {time.time() - tweet.created_at:.1f}s after the tweet" if tweet else ""
         mcap = f" · mcap ${snap.market_cap:,.0f} ({profile})" if snap.market_cap else ""
         smart = f" · {conf.describe()}" if conf is not None else ""
-        notes = "".join(f" · {n}" for n in (late_note, gate_note) if n)
+        notes = "".join(f" · {n}" for n in (late_note, gate_note, cost_note) if n)
         self.log("BUY", sym, f"{reason} — ${fill.usd:,.0f} @ {fill.price:.6g}, impact {fill.impact_pct:.2f}%"
                              f"{lag}{mcap}{smart}{notes} · size x{mult:.2g}")
         self.on_watch(mint)
@@ -367,6 +393,8 @@ class Trader:
     async def on_price(self, mint: str, px: float) -> None:
         if mint in self.leader_mints:
             self.leaders.update(self.leader_mints[mint], px)
+            if self.leader_mints[mint] == "SOL" and hasattr(self.broker, "sol_usd"):
+                self.broker.sol_usd = px                      # live fee accounting in USD
             if self.cfg["leader_guard"].get("enabled", True) and self.leaders.risk_off() and self.positions:
                 lead, chg = self.leaders.worst()
                 for p in list(self.positions.values()):
@@ -387,6 +415,10 @@ class Trader:
             if mint not in self.positions:
                 return
             for s in ladder_sells(pos, px, ex):
+                if s.skip:                                    # rung reached, sale not worth the fee
+                    pos.ladder_hits.append(s.rung)
+                    self.log("KOL", pos.symbol, s.reason)
+                    continue
                 qty = min(s.qty, pos.qty)
                 if qty <= 0:
                     break
@@ -397,6 +429,7 @@ class Trader:
                     break
                 pos.qty -= qty
                 pos.realized_usd += -fill.usd
+                pos.fees_usd += getattr(fill, "fee_usd", 0.0)
                 pos.initial_taken |= s.initial
                 if s.rung:
                     pos.ladder_hits.append(s.rung)
@@ -483,6 +516,7 @@ class Trader:
                 return
             pos.qty -= qty
             pos.realized_usd += -fill.usd
+            pos.fees_usd += getattr(fill, "fee_usd", 0.0)
             if self.store:
                 self.store.fill(pos.token, pos.symbol, "sell", qty, -fill.usd, fill.price, fill.impact_pct,
                                 getattr(fill, "signature", ""), why)
@@ -504,6 +538,7 @@ class Trader:
                 self.store.fill(pos.token, pos.symbol, "sell", pos.qty, -fill.usd, fill.price, fill.impact_pct,
                                 getattr(fill, "signature", ""), why)
             pos.realized_usd += -fill.usd
+            pos.fees_usd += getattr(fill, "fee_usd", 0.0)
             pos.qty = 0
             self._finish(pos, why)
 
@@ -512,8 +547,8 @@ class Trader:
         if self.store:
             self.store.tick(pos.token, self.last_px.get(pos.token, pos.entry_price))
             self.store.put("cash", self.broker.cash)
-        pnl = pos.realized_usd - pos.cost_usd
-        self.log("SELL", pos.symbol, why, pnl)
+        pnl = pos.realized_usd - pos.cost_usd - pos.fees_usd           # net of every fee paid
+        self.log("SELL", pos.symbol, why + (f" · fees ${pos.fees_usd:,.2f}" if pos.fees_usd else ""), pnl)
         if self.store:
             from ctmc.storage import exit_code
             self.store.close_position(pos, why)

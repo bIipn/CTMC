@@ -27,7 +27,7 @@ _STOP = {
 
 
 def norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", s.lower())
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
 def keywords_from_tweet(text: str, min_len: int = 3, limit: int = 6) -> list[str]:

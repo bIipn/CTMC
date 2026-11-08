@@ -19,6 +19,14 @@ import time
 from collections import defaultdict
 
 
+def _get(r, key, default=0.0):
+    try:
+        v = r[key]
+    except (KeyError, IndexError):
+        return default
+    return default if v is None else v
+
+
 def _pf(pnls: list[float]) -> float:
     wins, losses = sum(p for p in pnls if p > 0), -sum(p for p in pnls if p < 0)
     return round(wins / losses, 2) if losses else (float("inf") if wins else 0.0)
@@ -64,7 +72,10 @@ def summarize(rows: list, equity_curve: list[tuple[float, float]] | None = None)
         "median_hold_min": round(statistics.median(holds) / 60, 1),
         "median_latency_s": round(statistics.median(lat), 2) if lat else None,
         "best_peak_x": round(max(peaks), 1),
+        "fees_usd": round(sum(float(_get(r, "fees_usd")) for r in rows), 2),
     }
+    staked = sum(cost) or 1
+    out["fee_drag_pct"] = round(100 * out["fees_usd"] / staked, 2)          # network fees as % of money staked
     if equity_curve and len(equity_curve) > 1:
         peak, dd = equity_curve[0][1], 0.0
         for _, e in equity_curve:
@@ -115,6 +126,7 @@ def render(store, days: int = 30):
         ("Longest losing streak", s["max_losing_streak"]), ("Median hold", f"{s['median_hold_min']} min"),
         ("Median tweet → fill", f"{s['median_latency_s']} s" if s["median_latency_s"] is not None else "n/a"),
         ("Best peak", f"{s['best_peak_x']}x"),
+        ("Network fees paid (in PnL)", f"${s['fees_usd']:,.2f}  ({s['fee_drag_pct']}% of money staked)"),
     ]
     for k, v in labels:
         head.add_row(k, str(v))

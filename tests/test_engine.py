@@ -61,9 +61,11 @@ class FakeSafety:
         return Verdict(True, [])
 
 
-def trader(market=None, safety=None, cash=1000):
-    ex = dict(CFG["execution"], paper_fee_pct=0)
-    return Trader(CFG, PaperBroker(cash, ex), market or FakeMarket(), safety or FakeSafety())
+def trader(market=None, safety=None, cash=1000, fees=False):
+    """fees=False keeps the ladder math exact; fee behaviour has its own tests."""
+    ex = dict(CFG["execution"], paper_fee_pct=0, network_fee_usd=CFG["execution"]["network_fee_usd"] if fees else 0)
+    cfg = CFG if fees else dict(CFG, exits=dict(CFG["exits"], est_sell_fee_usd=0))
+    return Trader(cfg, PaperBroker(cash, ex), market or FakeMarket(), safety or FakeSafety())
 
 
 def elon_tweet(text=f"this is going to be huge pump.fun/coin/{MINT}", **kw):
@@ -849,3 +851,46 @@ def test_binance_book_ticker_parsing():
     assert parse_book_ticker({"data": {"s": "X"}}) is None
     b = BinanceLeaders({"SOL": "spot:SOLUSDT", "FARTCOIN": "futures:FARTCOINUSDT"}, None)
     assert b.by_market == {"spot": {"SOLUSDT": "SOL"}, "futures": {"FARTCOINUSDT": "FARTCOIN"}}
+
+
+
+# ── fees & slippage ──────────────────────────────────────────
+def test_cost_out_recovers_stake_plus_fees_and_pnl_is_net():
+    t = trader(market=FakeMarket(snap(liq=1e12)), fees=True)
+    run(t.on_tweet(elon_tweet()))
+    p = t.positions[MINT]
+    assert p.fees_usd == pytest.approx(0.20)                                # the buy's network fee
+    run(t.on_price(MINT, 2.001))
+    assert p.realized_usd == pytest.approx(100 + 0.20 + 0.20, rel=1e-3)     # stake + buy fee + this sale's fee
+    run(t.close(p, "volume died — the party's over"))
+    sell = [e for e in t.events if e.kind == "SELL"][-1]
+    assert "fees $0.60" in sell.detail
+    assert sell.pnl_usd == pytest.approx(p.realized_usd - 100 - 0.60)
+
+
+def test_fees_too_big_for_a_small_position_raise_or_skip():
+    small = trader(cash=100, fees=True)                                       # $10 bet: fees ~8% + slippage
+    run(small.on_tweet(elon_tweet()))
+    assert not small.positions and "fees + slippage would eat" in small.events[-1].detail
+    mid = trader(cash=150, fees=True)                                         # room to raise it to $16
+    run(mid.on_tweet(elon_tweet()))
+    assert mid.positions[MINT].cost_usd == pytest.approx(16) and "raised to $16" in mid.events[-1].detail
+
+
+def test_round_trip_cap_is_tighter():
+    t = trader(market=HoneypotMarket(0.09))
+    run(t.on_tweet(elon_tweet()))
+    assert not t.positions and "round trip loses 9.0%" in t.events[-1].detail
+
+
+def test_tiny_ladder_sales_are_skipped_not_paid_for():
+    p = Position(MINT, "MEME", 1.0, 1.0, 1.0)
+    p.initial_taken = True
+    sells = ladder_sells(p, 10.0, dict(CFG["exits"], min_sell_usd=6))       # half the bag = $5 < $6
+    assert len(sells) == 1 and sells[0].skip and sells[0].rung == 10
+    t = walk([2.001])
+    t.cfg = dict(t.cfg, exits=dict(t.cfg["exits"], min_sell_usd=10_000))
+    qty = t.positions[MINT].qty
+    run(t.on_price(MINT, 10.5))
+    assert t.positions[MINT].qty == qty and 10 in t.positions[MINT].ladder_hits   # rung marked, nothing sold
+    assert "not worth the fee" in t.events[-1].detail

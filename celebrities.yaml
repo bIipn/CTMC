@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────
+#  Who can trigger a buy.  The more the merrier — add freely.
+#
+#  handle    X username (no @)
+#  id        numeric X user ID. Leave "" and it's looked up at startup
+#            (needs X_BEARER_TOKEN). With a token, EVERY id is re-checked
+#            against its handle and corrected, so a typo can't silently
+#            mute someone. Webhook-only setups need ids filled in
+#            (tweeterid.com).
+#  keywords  names a coin "about them" would use: name, nicknames,
+#            catchphrases, pets, brands. Feeds the narrative radar.
+# ─────────────────────────────────────────────────────────────
+
+# ── Biggest market movers ─────────────────────────────────────
+- { handle: elonmusk,        id: "44196397",           keywords: [elon, musk, doge, kekius, xai, grok, tesla, spacex, marvin, floki] }
+- { handle: realDonaldTrump, id: "25073877",           keywords: [trump, maga, donald, potus, 47, melania, barron] }
+- { handle: MELANIATRUMP,    id: "",                   keywords: [melania, flotus] }
+- { handle: DonaldJTrumpJr,  id: "",                   keywords: [trumpjr, donjr] }
+- { handle: EricTrump,       id: "",                   keywords: [erictrump] }
+- { handle: JMilei,          id: "",                   keywords: [milei, libra, libertad] }
+- { handle: nayibbukele,     id: "",                   keywords: [bukele, elsalvador] }
+
+# ── Crypto founders & exchanges ───────────────────────────────
+- { handle: cz_binance,      id: "902926941413453824", keywords: [binance, bnb, cz, broccoli] }
+- { handle: heyibinance,     id: "",                   keywords: [yihe] }
+- { handle: justinsuntron,   id: "",                   keywords: [justinsun, tron, sunpump] }
+- { handle: VitalikButerin,  id: "",                   keywords: [vitalik, ethereum] }
+- { handle: aeyakovenko,     id: "",                   keywords: [toly, solana] }
+- { handle: rajgokal,        id: "",                   keywords: [rajgokal] }
+- { handle: saylor,          id: "244647486",          keywords: [saylor, microstrategy] }
+- { handle: brian_armstrong, id: "",                   keywords: [coinbase, base] }
+- { handle: 0xMert_,         id: "",                   keywords: [mert, helius] }
+
+# ── Solana meme ecosystem voices ──────────────────────────────
+- { handle: pumpdotfun,      id: "",                   keywords: [pumpfun, pump] }
+- { handle: a1lon9,          id: "",                   keywords: [alon] }
+- { handle: blknoiz06,       id: "",                   keywords: [ansem] }
+- { handle: MustStopMurad,   id: "",                   keywords: [murad, spx] }
+- { handle: cobie,           id: "",                   keywords: [cobie] }
+- { handle: HsakaTrades,     id: "",                   keywords: [hsaka] }
+- { handle: notthreadguy,    id: "",                   keywords: [threadguy] }
+- { handle: frankdegods,     id: "",                   keywords: [frank, degods] }
+- { handle: Cupseyy,         id: "",                   keywords: [cupsey] }
+
+# ── Celebrities who launched or pushed coins ──────────────────
+- { handle: Cobratate,       id: "",                   keywords: [tate, topg, cobra, hustlers, matrix, bugatti] }
+- { handle: TateTheTalisman, id: "",                   keywords: [tristan, tristantate, talisman] }
+- { handle: kanyewest,       id: "",                   keywords: [kanye, ye, yzy, yeezy] }
+- { handle: IGGYAZALEA,      id: "",                   keywords: [iggy, mother] }
+- { handle: Caitlyn_Jenner,  id: "",                   keywords: [jenner, caitlyn] }
+- { handle: loganpaul,       id: "",                   keywords: [loganpaul, prime, logan] }
+- { handle: jakepaul,        id: "",                   keywords: [jakepaul] }
+- { handle: SnoopDogg,       id: "",                   keywords: [snoop, dogg] }
+- { handle: stoolpresidente, id: "",                   keywords: [portnoy, barstool, davey] }
+- { handle: MrBeast,         id: "",                   keywords: [mrbeast, beast] }
+- { handle: haliewelch,      id: "",                   keywords: [hawk, hawktuah] }
+- { handle: MikeTyson,       id: "",                   keywords: [tyson] }
+- { handle: FloydMayweather, id: "",                   keywords: [mayweather, floyd] }
+- { handle: KimKardashian,   id: "",                   keywords: [kardashian, kim] }
+- { handle: ParisHilton,     id: "",                   keywords: [paris, hilton] }
+- { handle: Drake,           id: "",                   keywords: [drake, ovo] }
