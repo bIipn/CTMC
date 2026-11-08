@@ -1,6 +1,6 @@
 # ─────────────────────────────────────────────────────────────
 #  CTMC · Crypto Trade Meme Coins — configuration
-#  Every number here is a rule the bot obeys. Tune carefully.
+#  Event-driven: buys fire the moment a watched celebrity tweets a coin.
 # ─────────────────────────────────────────────────────────────
 
 mode: paper            # paper | live   (live needs WALLET_PRIVATE_KEY + --i-understand-the-risk)
@@ -8,57 +8,103 @@ chain: solana
 
 bankroll:
   starting_usd: 500          # paper balance
-  max_open_positions: 4      # "always trading 3-4 coins"
-  risk_per_trade_pct: 10     # % of equity per new position
+  max_open_positions: 4
+  risk_per_trade_pct: 10     # % of equity per celebrity entry
   reserve_pct: 30            # never deploy this slice of equity
-  daily_loss_limit_pct: 15   # bot halts for the day past this drawdown
+  daily_loss_limit_pct: 15
 
-# Governing ("leader") tokens. Meme coins on a chain tend to move after these.
+# ── Who can trigger a buy ─────────────────────────────────────
+# Use the numeric X user ID (never just the handle): handles can be
+# changed or impersonated, the ID can't. Find an ID at tweeterid.com.
+celebrities:
+  - { handle: elonmusk,        id: "44196397" }
+  - { handle: realDonaldTrump, id: "25073877" }
+  - { handle: cz_binance,      id: "902926941413453824" }
+  - { handle: saylor,          id: "244647486" }
+  # - { handle: someone,       id: "123..." }
+
+twitter:
+  source: x_stream           # x_stream (official X API filtered stream) | webhook (any alert service POSTs to us)
+  webhook_port: 8787
+  max_tweet_age_seconds: 20  # ignore stale tweets (stream reconnects, replays)
+  ignore_replies: true       # a reply mentioning a coin is weaker than an original post
+  ticker_min_liquidity_usd: 250000   # a $TICKER with no address must resolve to a big, established coin
+
+# Governing tokens: if these dump, the long tail follows.
 leaders:
   SOL:      So11111111111111111111111111111111111111112
   WIF:      EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm
   FARTCOIN: 9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump
 
 leader_guard:
-  window_minutes: 5          # look-back for leader moves
-  exit_drop_pct: 2.5         # leader falls this much in window -> cut exposure
-  block_entries_drop_pct: 1.5
+  enabled: true
+  window_minutes: 5
+  exit_drop_pct: 4.0         # celebrity coins move on their own; only bail on a real leader crash
+  block_entries_drop_pct: 2.5
 
-# Hard filters — a coin failing ANY of these is never touched.
+# ── Hard filters (a coin failing ANY is never bought) ─────────
 universe:
-  min_volume_24h_usd: 1000000
-  min_liquidity_usd: 150000
-  min_pair_age_hours: 24
-  max_pairs_tracked: 25
+  min_liquidity_usd: 75000       # summed across every DEX pool
+  min_volume_1h_usd: 50000
+  min_pair_age_minutes: 0        # celebrity plays are often new; safety + clusters do the protecting
 
 safety:
   require_mint_authority_revoked: true
   require_freeze_authority_revoked: true
   min_lp_locked_or_burned_pct: 90
-  max_top10_holders_pct: 30      # excludes LP / known exchange wallets
+  max_top10_holders_pct: 30
   max_single_holder_pct: 8
-  max_insider_cluster_pct: 15    # bundled / connected wallets from same funder
-  max_rugcheck_score: 1000       # rugcheck.xyz risk score (lower = safer)
-  max_sell_tax_pct: 5            # EVM honeypot check
+  max_insider_cluster_pct: 15
+  max_rugcheck_score: 1000
+  max_sell_tax_pct: 5
 
-hype:                       # X / Twitter sentiment via xAI Grok API
+clusters:                    # bubble-map style: which top holders were funded by the same wallet
   enabled: true
+  top_holders: 20
+  max_cluster_pct: 12        # one funder's wallets together may hold at most this
+  max_dev_linked_pct: 5      # wallets funded by / funding the creator
+  max_signatures_scan: 1000  # older, busier wallets are treated as independent
+
+hype:                        # Grok second opinion (adds 10-30s, so OFF on the instant path)
+  confirm_with_grok: false
   model: grok-4
-  min_score: 65              # 0-100, organic hype strength
-  min_credible_accounts: 2   # known, non-paid large accounts talking about it
+  min_score: 65
+  min_credible_accounts: 2
   cache_minutes: 30
 
-flow:                       # order-flow logic (DexScreener txn stats)
-  capitulation_drop_pct: 12      # price drop in 1h that counts as a panic flush
-  capitulation_sell_ratio: 1.8   # sells/buys in 5m at the flush
-  exhaustion_sell_ratio: 1.1     # sells cooled back to ~even -> buy the dip
-  dryup_buy_ratio: 0.6           # buys/sells in 5m below this -> buyers dried up
-  heavy_sell_volume_mult: 2.0    # 5m sell vol vs 1h avg -> major sales coming in
+checks:
+  timeout_seconds: 4         # all checks run in parallel; anything slower = no trade
 
+# ── Exits ─────────────────────────────────────────────────────
 exits:
-  take_initial_at_multiple: 2.0  # at 2x, sell enough to recover the full cost
-  runner_trailing_stop_pct: 25   # house-money runner trails from its peak
-  hard_stop_loss_pct: 18
-  max_hold_hours: 72
+  take_initial_at_multiple: 2.0      # at 2x: sell exactly what you put in. Rest is free.
+  ladder: [10, 30, 50, 100]          # at each multiple: sell half of what is left
+  ladder_sell_fraction: 0.5
+  after_ladder_every_x: 2.0          # past 100x: halve again at 200x, 400x, ...
+  final_exit_multiple: 1000          # ... and sell whatever is left here (halving alone never reaches zero)
+  dust_usd: 5                        # close out when the bag is worth less than this
+  volume_death_ratio: 0.25           # 5m volume < 25% of normal 5m volume ...
+  volume_death_checks: 6             #   ... for this many checks in a row -> sell everything
+  crash_trailing_stop_pct: 50        # backstop only: runner -50% from its peak
+  hard_stop_loss_pct: 30             # before the 2x is reached
+  max_hold_hours: 0                  # 0 = no time limit, let volume decide
 
-poll_seconds: 20
+flow:
+  dryup_buy_ratio: 0.6           # buys/sells in 5m below this -> buyers dried up
+  heavy_sell_volume_mult: 2.0    # 5m sell volume vs normal -> major sales coming in
+  capitulation_drop_pct: 12      # dip re-entry (celebrity-backed coins only): -12% in 1h ...
+  capitulation_sell_ratio: 1.8   #   ... with sells swamping buys ...
+  exhaustion_sell_ratio: 1.1     #   ... then buy once sellers are spent
+
+# ── Execution ─────────────────────────────────────────────────
+execution:
+  router: jupiter              # routes across every Solana DEX (Raydium, Orca, Meteora, Pump AMM, ...)
+  max_price_impact_pct: 3      # shrink the order until the route moves price less than this
+  buy_slippage_bps: 300        # 3%
+  sell_slippage_bps: 500       # 5% normally ...
+  panic_sell_slippage_bps: [800, 1500, 2500]   # ... escalating retries when we MUST get out
+  paper_fee_pct: 0.3
+
+monitor:
+  metrics_refresh_seconds: 3   # volume / buys / sells for open positions
+  price_refresh_seconds: 1     # Jupiter price feed when no Birdeye websocket key

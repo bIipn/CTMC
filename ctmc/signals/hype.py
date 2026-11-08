@@ -10,7 +10,7 @@ import json
 import os
 import time
 
-import requests
+import httpx
 
 from ctmc.models import Verdict
 
@@ -34,23 +34,21 @@ Reply with ONLY this JSON, no prose:
 
 
 class HypeChecker:
-    def __init__(self, rules: dict, session: requests.Session | None = None):
+    def __init__(self, rules: dict, http: httpx.AsyncClient | None = None):
         self.r = rules
-        self.http = session or requests.Session()
+        self.http = http or httpx.AsyncClient(timeout=90)
         self.key = os.getenv("XAI_API_KEY", "")
         self._cache: dict[str, tuple[float, Verdict]] = {}
 
-    def check(self, symbol: str, mint: str) -> Verdict:
-        if not self.r.get("enabled", True):
-            return Verdict(True, ["hype check disabled"])
+    async def check(self, symbol: str, mint: str) -> Verdict:
         hit = self._cache.get(mint)
         if hit and time.time() - hit[0] < self.r.get("cache_minutes", 30) * 60:
             return hit[1]
-        verdict = self._ask_grok(symbol, mint)
+        verdict = await self._ask_grok(symbol, mint)
         self._cache[mint] = (time.time(), verdict)
         return verdict
 
-    def _ask_grok(self, symbol: str, mint: str) -> Verdict:
+    async def _ask_grok(self, symbol: str, mint: str) -> Verdict:
         if not self.key:
             return Verdict(False, ["XAI_API_KEY not set — cannot verify X hype (fail closed)"])
         body = {
@@ -60,14 +58,14 @@ class HypeChecker:
             "temperature": 0,
         }
         try:
-            resp = self.http.post(
-                XAI_URL, json=body, timeout=90,
+            resp = await self.http.post(
+                XAI_URL, json=body,
                 headers={"Authorization": f"Bearer {self.key}"},
             )
             resp.raise_for_status()
             text = resp.json()["choices"][0]["message"]["content"]
             data = json.loads(text[text.find("{"): text.rfind("}") + 1])
-        except (requests.RequestException, KeyError, ValueError) as exc:
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
             return Verdict(False, [f"grok error ({exc.__class__.__name__}) — fail closed"])
         return self.evaluate(data)
 

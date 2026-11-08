@@ -1,32 +1,34 @@
 """CTMC command line.
 
-  python -m ctmc check <mint>      safety + X-hype report for one coin
-  python -m ctmc scan              screen trending coins through every filter
-  python -m ctmc run               start the bot (paper by default)
+  python -m ctmc check <mint>                 every check on one coin, YES / NO
+  python -m ctmc test-tweet "<text>" --as elonmusk
+                                              dry-run what the bot would do with a tweet
+  python -m ctmc run                          start the bot (paper by default)
   python -m ctmc run --live --i-understand-the-risk
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
+import os
 import sys
 import time
 
+import httpx
 from rich.console import Console
-from rich.live import Live
-from rich.table import Table
 
 from ctmc import config
-from ctmc.dashboard import render
-from ctmc.data.dexscreener import DexScreener
+from ctmc.data.market import Market
+from ctmc.execution.broker import PaperBroker, max_size_for_impact
+from ctmc.feeds.twitter import Tweet, extract_coins
 from ctmc.safety.checker import SafetyChecker
 from ctmc.signals.hype import HypeChecker
-from ctmc.strategy.engine import Engine
+from ctmc.strategy.engine import Trader
 
 con = Console()
 
 
 def _load_dotenv(path: str = ".env") -> None:
-    import os
     try:
         for line in open(path, encoding="utf-8"):
             k, sep, v = line.strip().partition("=")
@@ -36,89 +38,62 @@ def _load_dotenv(path: str = ".env") -> None:
         pass
 
 
-def _tick_badge(ok: bool) -> str:
+def _badge(ok: bool) -> str:
     return "[bold green]✔ PASS[/]" if ok else "[bold red]✘ FAIL[/]"
 
 
-def cmd_check(cfg, mint: str) -> None:
-    dex = DexScreener(cfg.chain)
-    s = dex.best_pair(mint)
-    if not s:
-        con.print("[red]No pair found on this chain.[/]")
-        return
-    eng = Engine(cfg, broker=type("B", (), {"cash": 0})(), safety=None, hype=None)
-    u = eng.passes_universe(s)
-    sv = SafetyChecker(cfg["safety"]).check(mint, cfg.chain)
-    hv = HypeChecker(cfg["hype"]).check(s.symbol, mint)
+async def cmd_check(cfg, mint: str) -> None:
+    async with httpx.AsyncClient(timeout=15) as http:
+        market = Market(cfg.chain, http)
+        snap = await market.snapshot(mint)
+        if not snap:
+            con.print("[bold red]NO[/] — no tradable pool on any Solana DEX.")
+            return
+        safety = SafetyChecker(cfg["safety"], cfg["clusters"], http)
+        trader = Trader(cfg, PaperBroker(0, cfg["execution"]), market, safety)
+        u = trader.passes_universe(snap)
+        sv, hv = await asyncio.gather(safety.check(mint), HypeChecker(cfg["hype"], http).check(snap.symbol, mint))
 
-    con.rule(f"[bold bright_cyan]{s.symbol}[/]  ·  {mint[:6]}…{mint[-4:]}")
-    con.print(f"price ${s.price_usd:.6g}   liq ${s.liquidity_usd:,.0f}   vol24h ${s.volume_24h:,.0f}   "
-              f"age {s.age_hours:.0f}h   5m buys/sells {s.buys_m5}/{s.sells_m5}")
-    for name, v in (("Volume & liquidity", u), ("Rug / bundle safety", sv), ("X hype (Grok)", hv)):
-        con.print(f"\n{_tick_badge(v.ok)}  [bold]{name}[/]")
+    yes = u.ok and sv.ok
+    con.print(f"\n[bold {'green' if yes else 'red'}]{'YES — passes the hard filters' if yes else 'NO — the bot would not buy this'}[/]")
+    con.rule(f"[bold bright_cyan]{snap.symbol}[/]  ·  {mint[:6]}…{mint[-4:]}")
+    con.print(f"price ${snap.price_usd:.6g}   mcap ${snap.market_cap:,.0f}   age {snap.age_hours:.1f}h")
+    con.print(f"liquidity ${snap.liquidity_usd:,.0f} across {len(snap.pools)} pools: "
+              + ", ".join(f"{d} ${v:,.0f}" for d, v in sorted(snap.pools.items(), key=lambda kv: -kv[1])))
+    con.print(f"volume 5m ${snap.volume_m5:,.0f} · 1h ${snap.volume_h1:,.0f} · 24h ${snap.volume_24h:,.0f}   "
+              f"5m buys/sells {snap.buys_m5}/{snap.sells_m5}")
+    con.print(f"max buy within {cfg.execution['max_price_impact_pct']}% price impact: "
+              f"[bold]${max_size_for_impact(snap.liquidity_usd, cfg.execution['max_price_impact_pct']):,.0f}[/]")
+    rows = (("Volume & liquidity", u), ("Rug, bundles & bubble map", sv),
+            ("X hype via Grok (info only)", hv))
+    for name, v in rows:
+        con.print(f"\n{_badge(v.ok)}  [bold]{name}[/]")
         for r in v.reasons:
             con.print(f"     • {r}", style="grey70")
-    verdict = u and sv and hv
-    con.print(f"\n[bold]{'YES — tradable' if verdict else 'NO — avoid'}[/]", style="green" if verdict else "red")
 
 
-def cmd_scan(cfg) -> None:
-    dex = DexScreener(cfg.chain)
-    safety = SafetyChecker(cfg["safety"])
-    eng = Engine(cfg, broker=type("B", (), {"cash": 0})(), safety=None, hype=None)
-    t = Table(title="CTMC scan", header_style="bold bright_cyan", border_style="grey37")
-    for c in ("Coin", "Vol 24h", "Liq", "Universe", "Safety", "Why not"):
-        t.add_column(c)
-    for mint in dex.trending_tokens()[: cfg.universe["max_pairs_tracked"]]:
-        s = dex.best_pair(mint)
-        if not s:
-            continue
-        u = eng.passes_universe(s)
-        sv = safety.check(mint, cfg.chain) if u else None
-        why = (u.reasons or (sv.reasons if sv else []))[:2]
-        t.add_row(s.symbol, f"${s.volume_24h/1e6:.1f}M", f"${s.liquidity_usd/1e3:.0f}k",
-                  _tick_badge(u.ok), _tick_badge(sv.ok) if sv else "—", "; ".join(why))
-    con.print(t)
-
-
-def cmd_run(cfg, live: bool) -> None:
-    from ctmc.execution.broker import JupiterBroker, PaperBroker
-
-    broker = JupiterBroker() if live else PaperBroker(cfg.bankroll["starting_usd"])
-    eng = Engine(cfg, broker=broker, safety=SafetyChecker(cfg["safety"]), hype=HypeChecker(cfg["hype"]))
-    dex = DexScreener(cfg.chain)
-    watch: list[str] = []
-    last_refresh = 0.0
-    mode = "live" if live else "paper"
-
-    with Live(render(eng, [], mode), console=con, refresh_per_second=2, screen=False) as ui:
-        while True:
-            try:
-                if time.time() - last_refresh > 600:      # refresh candidate list every 10 min
-                    watch = dex.trending_tokens()[: cfg.universe["max_pairs_tracked"]]
-                    last_refresh = time.time()
-                leaders = {}
-                for name, mint in cfg.leaders.items():
-                    p = dex.best_pair(mint)
-                    if p:
-                        leaders[name] = p.price_usd
-                tokens = list(dict.fromkeys(watch + list(eng.positions)))
-                snaps = [s for m in tokens if (s := dex.best_pair(m))]
-                eng.tick(leaders, snaps)
-                ui.update(render(eng, snaps, mode))
-            except KeyboardInterrupt:
-                break
-            except Exception as exc:  # keep running through transient API errors
-                eng.log("HALT", "-", f"tick error: {exc.__class__.__name__}: {exc}")
-            time.sleep(cfg.poll_seconds)
+async def cmd_test_tweet(cfg, text: str, handle: str) -> None:
+    ids = {c["handle"].lower(): c["id"] for c in cfg["celebrities"]}
+    author = ids.get(handle.lower().lstrip("@"), "0")
+    coins = extract_coins(text)
+    con.print(f"contract addresses found: {coins.mints or 'none'}   tickers: {coins.tickers or 'none'}")
+    async with httpx.AsyncClient(timeout=15) as http:
+        market = Market(cfg.chain, http)
+        t = Trader(cfg, PaperBroker(cfg.bankroll["starting_usd"], cfg["execution"]), market,
+                   SafetyChecker(cfg["safety"], cfg["clusters"], http), HypeChecker(cfg["hype"], http))
+        await t.on_tweet(Tweet(id="test", author_id=author, text=text, created_at=time.time()))
+    if not t.events:
+        con.print("[bold red]NO[/] — ignored (not a watched celebrity, or no coin in the tweet).")
+    for e in t.events:
+        con.print(f"[bold]{e.kind:<6}[/] {e.symbol:<12} {e.detail}")
 
 
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(prog="ctmc", description="Meme-coin flow trader")
+    ap = argparse.ArgumentParser(prog="ctmc", description="Celebrity-signal meme-coin trader")
     ap.add_argument("--config", default="config.yaml")
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check"); c.add_argument("mint")
-    sub.add_parser("scan")
+    tt = sub.add_parser("test-tweet"); tt.add_argument("text"); tt.add_argument("--as", dest="handle", required=True)
     r = sub.add_parser("run")
     r.add_argument("--live", action="store_true")
     r.add_argument("--i-understand-the-risk", dest="ack", action="store_true")
@@ -127,13 +102,17 @@ def main(argv: list[str] | None = None) -> None:
     cfg = config.load(a.config)
 
     if a.cmd == "check":
-        cmd_check(cfg, a.mint)
-    elif a.cmd == "scan":
-        cmd_scan(cfg)
+        asyncio.run(cmd_check(cfg, a.mint))
+    elif a.cmd == "test-tweet":
+        asyncio.run(cmd_test_tweet(cfg, a.text, a.handle))
     else:
         if a.live and not a.ack:
             sys.exit("Live trading spends real money. Re-run with --i-understand-the-risk.")
-        cmd_run(cfg, a.live)
+        from ctmc.runner import run
+        try:
+            asyncio.run(run(cfg, a.live, con))
+        except KeyboardInterrupt:
+            con.print("\n[grey50]stopped.[/]")
 
 
 if __name__ == "__main__":
