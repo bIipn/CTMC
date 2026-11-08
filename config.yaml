@@ -44,6 +44,8 @@ leader_guard:
   window_minutes: 5
   exit_drop_pct: 4.0         # celebrity coins move on their own; only bail on a real leader crash
   block_entries_drop_pct: 2.5
+  release_ratio: 0.5         # once blocked, stay blocked until leaders recover to half that drop
+  stale_seconds: 90          # leader prices stopped updating -> no buys (the guard would be blind)
 
 # ── Hard filters (a coin failing ANY is never bought) ─────────
 universe:
@@ -139,6 +141,17 @@ rugwatch:                    # after buying: watch for the rug in real time
   whale_supply_dumped_pct: 5 # top holders together dump this share of supply -> out
   poll_seconds: 5            # balance polling while the websocket is down
 
+notify:                      # phone alerts: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID and/or DISCORD_WEBHOOK_URL
+  kinds: [BUY, SELL, HALT, KOL]   # rug alerts / pauses always come through
+  dedup_seconds: 60
+
+postbuy:                     # checks that run AFTER buying — can only reduce risk
+  engagement_check: true     # ~1 min after the post: is it catching on vs this celebrity's usual?
+  engagement_after_s: 60
+  engagement_min_history: 5  # needs 5 of their past coin posts before judging
+  engagement_weak_ratio: 0.5 # under half their usual engagement -> sell half
+  grok_review: true          # Grok's read of the X hype after buying (needs XAI_API_KEY)
+
 hype:                        # Grok second opinion (adds 10-30s, so OFF on the instant path)
   confirm_with_grok: false
   model: grok-4
@@ -148,6 +161,29 @@ hype:                        # Grok second opinion (adds 10-30s, so OFF on the i
 
 checks:
   timeout_seconds: 4         # all checks run in parallel; anything slower = no trade
+  round_trip: true           # quote buy -> sell before buying: catches honeypots and hidden taxes
+  round_trip_usd: 50
+  max_round_trip_cost_pct: 15
+  late_pump_pct_1h: 300      # already up 300%+ this hour -> half size
+  very_late_pump_pct_1h: 1000  # up 1000%+ -> quarter size
+
+protections:                 # the brakes (all survive restarts)
+  halt_file: data/HALT       # exists = no buys. Telegram /pause creates it, /resume removes it
+  max_buys_per_day: 12
+  max_buys_per_signal_per_day: 3
+  coin_cooldown_minutes: 60  # no re-buying a coin right after selling it
+  stopout_limit: 3           # 3 ANOMALY exits (rug alert / leader crash / stop within 2 min of buying) ...
+  stopout_lookback_hours: 24 # ... within 24h ...
+  stopout_pause_hours: 12    # ... pause new buys 12h. Ordinary -30% stops don't count (they're normal here)
+  max_drawdown_pct: 30       # equity 30% under its peak ...
+  drawdown_lookback_hours: 72
+  drawdown_pause_hours: 24   # ... pause 24h
+  scorecard_days: 30         # each celebrity / signal judged on its own last 30 days:
+  min_outcomes: 15           #   after 15+ trades (fewer = mostly luck) ...
+  weak_hit_rate: 0.12        #   <= 12% reached 2x -> half size
+  bench_hit_rate: 0.05       #   <= 5% reached 2x -> benched ...
+  bench_days: 7              #   ... for 7 days
+  losing_streak: 0           # off: long losing streaks are NORMAL for a few-big-winners strategy
 
 # ── Exits ─────────────────────────────────────────────────────
 exits:
@@ -160,8 +196,11 @@ exits:
   volume_death_ratio: 0.25           # 5m volume < 25% of normal 5m volume ...
   volume_death_checks: 6             #   ... for this many checks in a row -> sell everything
   crash_trailing_stop_pct: 50        # backstop only: runner -50% from its peak
+  profit_floors: [[10, 6], [30, 21], [100, 75], [300, 240]]   # the bigger the run, the tighter the lock:
+                                     # peaked 10x -> keep >= 6x (-40%), 30x -> 21x (-30%), 100x -> 75x (-25%), 300x -> 240x (-20%)
   hard_stop_loss_pct: 30             # before the 2x is reached
   max_hold_hours: 0                  # 0 = no time limit, let volume decide
+  no_2x_exit_hours: 24               # time barrier: never reached 2x within 24h -> out (0 = off)
 
 flow:
   dryup_buy_ratio: 0.6           # buys/sells in 5m below this -> buyers dried up
@@ -178,7 +217,12 @@ execution:
   sell_slippage_bps: 500       # 5% normally ...
   panic_sell_slippage_bps: [800, 1500, 2500]   # ... escalating retries when we MUST get out
   paper_fee_pct: 0.3
+  min_sol_reserve: 0.1         # always keep this much SOL for fees; buys stop below it
+  max_entry_drift_pct: 25      # chase guard: price ran more than this since the checks -> no buy
+  max_priority_fee_lamports: 3000000
+  jito_tip_lamports: 0         # > 0: send privately via Jito with this tip (sandwich protection)
 
 monitor:
   metrics_refresh_seconds: 3   # volume / buys / sells for open positions
-  price_refresh_seconds: 1     # Jupiter price feed when no Birdeye websocket key
+  price_refresh_seconds: 2     # Jupiter price feed (free key = 60 calls/min: keep >= 2s)
+  equity_snapshot_seconds: 60

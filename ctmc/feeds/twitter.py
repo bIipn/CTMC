@@ -99,6 +99,14 @@ def _parse_time(s: str | None) -> float:
         return time.time()
 
 
+def tweet_time_from_id(tweet_id: str) -> float | None:
+    """Exact post time encoded in an X snowflake ID: ms = (id >> 22) + 1288834974657."""
+    try:
+        return ((int(tweet_id) >> 22) + 1288834974657) / 1000
+    except (TypeError, ValueError):
+        return None
+
+
 def tweet_from_v2(payload: dict) -> Tweet | None:
     d = payload.get("data") or {}
     if not d.get("id"):
@@ -106,7 +114,7 @@ def tweet_from_v2(payload: dict) -> Tweet | None:
     refs = d.get("referenced_tweets") or []
     return Tweet(
         id=d["id"], author_id=str(d.get("author_id", "")), text=d.get("note_tweet", {}).get("text") or d.get("text", ""),
-        created_at=_parse_time(d.get("created_at")),
+        created_at=tweet_time_from_id(d["id"]) or _parse_time(d.get("created_at")),   # ID time is exact to the ms
         is_reply=any(r.get("type") == "replied_to" for r in refs),
     )
 

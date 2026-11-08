@@ -10,6 +10,11 @@
   python -m ctmc kols list                    who counts as smart money, and why
   python -m ctmc kols score <wallet> [--name] score any wallet from its own on-chain swaps
   python -m ctmc kols add <name> <wallet> [--x handle] [--celebrity]
+
+  python -m ctmc report [--days 30] [--live]  performance: per celebrity, per exit rule, honest metrics
+  python -m ctmc simulate [--compare] [--synthetic] [--trades 100] [--runs 10000]
+                                              time machine: replay the exit rules thousands of times
+  python -m ctmc pause | resume               kill switch (same as Telegram /pause, /resume)
 """
 from __future__ import annotations
 
@@ -97,6 +102,33 @@ async def cmd_check(cfg, mint: str) -> None:
         con.print(f"     • {r}", style="grey70")
 
 
+def cmd_simulate(cfg, a) -> None:
+    from rich.table import Table
+
+    from ctmc.simulate import recorded_paths, run, synthetic_paths
+    from ctmc.storage import Store
+    paths, source = recorded_paths(Store.for_mode("live" if a.live else "paper")), "recorded"
+    if a.synthetic or len(paths) < 20:
+        if not a.synthetic:
+            con.print(f"[yellow]Only {len(paths)} recorded price paths so far (need 20+). Run the bot in paper mode "
+                      f"to build real ones, or pass --synthetic to see how the rules behave on made-up paths.[/]")
+            return
+        paths, source = synthetic_paths(1000), "SYNTHETIC"
+        con.print("[bold yellow]⚠ SYNTHETIC PATHS — an assumed, deliberately pessimistic outcome mix. These numbers "
+                  "show how your rules interact, NOT what you will earn.[/]")
+    res = run(paths, dict(cfg["exits"]), cfg["bankroll"]["risk_per_trade_pct"], a.trades, a.runs, a.compare)
+    t = Table(title=f"Time machine · {len(paths)} {source} paths · {a.runs:,} runs × {a.trades} trades · "
+                    f"{cfg['bankroll']['risk_per_trade_pct']}% of equity per trade",
+              header_style="bold bright_cyan", border_style="grey37")
+    for c in ("Rules", "Chance of profit", "Final equity 5% / median / 95%", "Median drawdown", "Chance of -50% drawdown",
+              "Avg banked per trade"):
+        t.add_column(c, justify="left" if c == "Rules" else "right")
+    for name, mc in res.items():
+        t.add_row(name, f"{mc.p_profit:.0%}", f"{mc.final_p5:.2f}x / {mc.final_median:.2f}x / {mc.final_p95:.2f}x",
+                  f"{mc.dd_median:.0%}", f"{mc.p_dd50:.0%}", f"{mc.avg_banked:.2f}x")
+    con.print(t)
+
+
 def _kol_table(reg: Registry, rules: dict, limit: int = 40):
     from rich.table import Table
     t = Table(header_style="bold bright_cyan", border_style="grey37", title="Smart money registry")
@@ -178,6 +210,12 @@ def main(argv: list[str] | None = None) -> None:
     r = sub.add_parser("run")
     r.add_argument("--live", action="store_true")
     r.add_argument("--i-understand-the-risk", dest="ack", action="store_true")
+    rp = sub.add_parser("report"); rp.add_argument("--days", type=int, default=30); rp.add_argument("--live", action="store_true")
+    sm = sub.add_parser("simulate"); sm.add_argument("--compare", action="store_true")
+    sm.add_argument("--synthetic", action="store_true"); sm.add_argument("--trades", type=int, default=100)
+    sm.add_argument("--runs", type=int, default=10_000); sm.add_argument("--live", action="store_true")
+    for name in ("pause", "resume"):
+        sub.add_parser(name).add_argument("--live", action="store_true")
     k = sub.add_parser("kols", help="manage the smart-money registry")
     ksub = k.add_subparsers(dest="kcmd")
     ki = ksub.add_parser("import"); ki.add_argument("--limit", type=int, default=60)
@@ -195,6 +233,19 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(cmd_test_tweet(cfg, a.text, a.handle))
     elif a.cmd == "kols":
         asyncio.run(cmd_kols(cfg, a))
+    elif a.cmd == "report":
+        from ctmc import report
+        from ctmc.storage import Store
+        con.print(report.render(Store.for_mode("live" if a.live else "paper"), a.days))
+    elif a.cmd == "simulate":
+        cmd_simulate(cfg, a)
+    elif a.cmd in ("pause", "resume"):
+        from ctmc.protections import Protections
+        from ctmc.storage import Store
+        pr = Protections(cfg["protections"], Store.for_mode("live" if a.live else "paper"))
+        pr.halt("manual (command line)") if a.cmd == "pause" else pr.resume()
+        con.print("[bold red]⛔ paused — no new buys (exits keep running)[/]" if a.cmd == "pause"
+                  else "[bold green]🟢 resumed — buys allowed[/]")
     else:
         if a.live and not a.ack:
             sys.exit("Live trading spends real money. Re-run with --i-understand-the-risk.")

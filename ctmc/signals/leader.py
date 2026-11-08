@@ -15,10 +15,15 @@ class LeaderGuard:
         self.window_s = rules.get("window_minutes", 5) * 60
         self.exit_drop = rules.get("exit_drop_pct", 2.5)
         self.block_drop = rules.get("block_entries_drop_pct", 1.5)
+        self.release = rules.get("release_ratio", 0.5)      # hysteresis: must recover to half the trigger
+        self.stale_s = rules.get("stale_seconds", 90)
         self.history: dict[str, deque[tuple[float, float]]] = {}
+        self._blocked = False
+        self.last_update = 0.0
 
     def update(self, name: str, price: float, ts: float | None = None) -> None:
         ts = ts if ts is not None else time.time()
+        self.last_update = max(self.last_update, ts)
         q = self.history.setdefault(name, deque())
         q.append((ts, price))
         while q and ts - q[0][0] > self.window_s:
@@ -42,5 +47,16 @@ class LeaderGuard:
         """Leaders are dumping -> sell exposure now."""
         return self.worst()[1] <= -self.exit_drop
 
+    def stale(self) -> bool:
+        """Leader prices were flowing and stopped: the guard is blind, so don't buy."""
+        return bool(self.history) and time.time() - self.last_update > self.stale_s
+
     def entries_blocked(self) -> bool:
-        return self.worst()[1] <= -self.block_drop
+        if self.stale():
+            return True
+        chg = self.worst()[1]
+        if chg <= -self.block_drop:
+            self._blocked = True
+        elif self._blocked and chg > -self.block_drop * self.release:
+            self._blocked = False                           # no flapping on/off around the threshold
+        return self._blocked

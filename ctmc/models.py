@@ -74,6 +74,8 @@ class Position:
     ladder_hits: list[float] = field(default_factory=list)   # multiples already sold at
     source: str = ""              # e.g. "@elonmusk tweet 1789..."
     profile: str = ""             # "early" | "established"
+    signal: str = ""              # who/what triggered it: "@elonmusk", "narrative:@Cobratate", ...
+    entry_latency_s: float | None = None   # tweet -> fill
     low_volume_streak: int = 0
 
     def __post_init__(self) -> None:

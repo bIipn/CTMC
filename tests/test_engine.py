@@ -628,3 +628,214 @@ def test_pumpportal_messages():
                                "traderPublicKey": "dev", "marketCapSol": 28.5})
     assert kind == "new" and tok.symbol == "TOPG" and tok.market_cap_sol == 28.5
     assert parse_message({"txType": "buy", "mint": MINT}) is None
+
+
+# ── research-driven upgrades: storage, protections, exits, checks, reports, time machine ──
+from ctmc.execution.broker import balance_delta, slippage_error  # noqa: E402
+from ctmc.feeds.twitter import tweet_time_from_id  # noqa: E402
+from ctmc.notify import Notifier, TelegramControl  # noqa: E402
+from ctmc.protections import Protections  # noqa: E402
+from ctmc.report import summarize  # noqa: E402
+from ctmc.signals.leader import LeaderGuard  # noqa: E402
+from ctmc.signals.postbuy import PostBuyReview, engagement_score  # noqa: E402
+from ctmc.simulate import monte_carlo, replay  # noqa: E402
+from ctmc.storage import Store, exit_code  # noqa: E402
+
+
+@pytest.fixture
+def store(tmp_path):
+    return Store(tmp_path / "t.sqlite")
+
+
+def stored_trader(store, tmp_path, market=None, **kw):
+    t = trader(market=market or FakeMarket(snap(liq=1e12)), **kw)
+    t.store = store
+    t.protect = Protections(dict(CFG["protections"], halt_file=str(tmp_path / "HALT")), store)
+    return t
+
+
+def test_positions_survive_a_restart(store, tmp_path):
+    t = stored_trader(store, tmp_path)
+    run(t.on_tweet(elon_tweet()))
+    run(t.on_price(MINT, 2.01))                                  # 2x: cost basis pulled
+    again = {p.token: p for p in Store(store.path).open_positions()}
+    p = again[MINT]
+    assert p.initial_taken and p.signal == "@elonmusk" and p.qty == pytest.approx(t.positions[MINT].qty)
+    run(t.close(t.positions[MINT], "volume died — the party's over"))
+    row = store.closed()[0]
+    assert row["exit_code"] == "volume_death" and row["hit_2x"] == 1 and row["peak_multiple"] >= 2
+
+
+def test_kill_switch_and_coin_cooldown(store, tmp_path):
+    t = stored_trader(store, tmp_path)
+    t.protect.halt("test")
+    run(t.on_tweet(elon_tweet()))
+    assert not t.positions and "kill switch" in t.events[-1].detail
+    t.protect.resume()
+    run(t.on_tweet(elon_tweet()))
+    run(t.close(t.positions[MINT], "hard stop (-31%)"))
+    run(t.on_tweet(elon_tweet()))                                # same coin tweeted again right away
+    assert MINT not in t.positions and "cooling down" in t.events[-1].detail
+
+
+def _close_row(store, token, code_reason, pnl, held_s=3600, signal="@x", hit=False):
+    p = Position(token, token, 1.0, 0, 100, opened_at=time.time() - held_s, source="", ladder_hits=[])
+    p.signal, p.initial_taken = signal, hit
+    p.realized_usd = 100 + pnl
+    store.save_position(p)
+    store.close_position(p, code_reason)
+
+
+def test_only_anomalies_trip_the_pause(store, tmp_path):
+    pr = Protections(dict(CFG["protections"], halt_file=str(tmp_path / "HALT")), store)
+    for i in range(5):                                           # five ordinary -30% stops after an hour: normal
+        _close_row(store, f"T{i}", "hard stop (-30%)", -30)
+        pr.after_close(f"T{i}", "hard_stop", -30)
+    assert store.active_lock("*") is None
+    for i in range(3):                                           # three rugs: something is wrong
+        _close_row(store, f"R{i}", "RUG ALERT — liquidity pulled", -90)
+        notes = pr.after_close(f"R{i}", "rug", -90)
+    assert store.active_lock("*") and "pausing" in notes[0]
+
+
+def test_quick_stop_counts_as_anomaly(store, tmp_path):
+    pr = Protections(dict(CFG["protections"], halt_file=str(tmp_path / "HALT")), store)
+    for i in range(3):
+        _close_row(store, f"Q{i}", "hard stop (-30%)", -30, held_s=40)
+        pr.after_close(f"Q{i}", "hard_stop", -30)
+    assert store.active_lock("*") is not None
+
+
+def test_signal_scorecard_halves_then_benches(store, tmp_path):
+    rules = dict(CFG["protections"], halt_file=str(tmp_path / "HALT"), max_buys_per_signal_per_day=99, max_buys_per_day=99)
+    pr = Protections(rules, store)
+    for i in range(16):                                          # 1 of 16 reached 2x = 6%: weak
+        _close_row(store, f"S{i}", "hard stop (-30%)", -30, signal="@weak", hit=i < 1)
+    g = pr.check_entry("NEW", "@weak")
+    assert g.ok and g.scale == 0.5 and "weak record" in g.reason
+    for i in range(16, 40):                                      # now 1 of 40 = 2.5%: benched
+        _close_row(store, f"S{i}", "hard stop (-30%)", -30, signal="@weak", hit=False)
+    g = pr.check_entry("NEW2", "@weak")
+    assert not g.ok and "benched" in g.reason
+
+
+def test_profit_floor_locks_gains_on_a_big_run():
+    t = walk([2.001, 12.0])                                      # peaked 12x -> floor 6x
+    assert MINT in t.positions
+    run(t.on_price(MINT, 5.9))
+    assert MINT not in t.positions and "profit floor" in t.events[-1].detail
+
+
+def test_no_2x_time_barrier():
+    t = trader()
+    run(t.on_tweet(elon_tweet()))
+    t.positions[MINT].opened_at -= 25 * 3600
+    run(t.on_price(MINT, 1.1))
+    assert MINT not in t.positions and "no 2x within 24h" in t.events[-1].detail
+
+
+class HoneypotMarket(FakeMarket):
+    def __init__(self, trip):
+        super().__init__()
+        self.trip = trip
+
+    async def round_trip(self, mint, usd):
+        if isinstance(self.trip, Exception):
+            raise self.trip
+        return self.trip
+
+
+def test_round_trip_quote_catches_honeypots_and_taxes():
+    t = trader(market=HoneypotMarket(RuntimeError("no route")))
+    run(t.on_tweet(elon_tweet()))
+    assert not t.positions and "honeypot" in t.events[-1].detail
+    t2 = trader(market=HoneypotMarket(0.22))
+    run(t2.on_tweet(elon_tweet()))
+    assert not t2.positions and "round trip loses 22.0%" in t2.events[-1].detail
+    t3 = trader(market=HoneypotMarket(0.03))
+    run(t3.on_tweet(elon_tweet()))
+    assert MINT in t3.positions
+
+
+def test_late_entries_are_smaller():
+    t = trader(market=FakeMarket(snap(h1=450)))
+    run(t.on_tweet(elon_tweet()))
+    assert t.positions[MINT].cost_usd == pytest.approx(50) and "half size" in t.events[-1].detail
+
+
+def test_leader_guard_hysteresis_and_staleness():
+    g = LeaderGuard(dict(CFG["leader_guard"]))
+    now = time.time()
+    g.update("SOL", 100, now - 30)
+    g.update("SOL", 97, now - 20)                                # -3%: block
+    assert g.entries_blocked()
+    g.update("SOL", 98.2, now - 10)                              # -1.8%: still blocked (needs > -1.25%)
+    assert g.entries_blocked()
+    g.update("SOL", 99.5, now)                                   # recovered
+    assert not g.entries_blocked()
+    g.last_update = now - 600                                    # feed died
+    assert g.entries_blocked() and g.stale()
+
+
+def test_report_metrics_for_fat_tails():
+    rows = [{"pnl_usd": p, "cost_usd": 100, "peak_multiple": pk, "exit_multiple": ex, "hit_2x": int(pk >= 2),
+             "closed_at": 3600, "opened_at": 0, "entry_latency_s": 1.5}
+            for p, pk, ex in [(900, 20, 10), (-30, 1.1, 0.7), (-30, 1.2, 0.7), (-30, 1.0, 0.7), (40, 2.5, 1.4)]]
+    s = summarize(rows)
+    assert s["n"] == 5 and s["hit_2x_rate"] == 40.0
+    assert s["best_trade_share_pct"] == pytest.approx(100 * 900 / 850, abs=0.1)
+    assert s["pf_without_best"] < 1 < s["profit_factor"]                      # the one big win carries it all
+    assert s["median_return_pct"] == -30.0 and s["capture_ratio"] == pytest.approx((10 / 20 + 1.4 / 2.5) / 2, abs=0.01)
+
+
+def test_time_machine_replay_and_monte_carlo():
+    ex = dict(CFG["exits"])
+    moon = [(i * 60, m) for i, m in enumerate([1.3, 2.1, 6, 12, 25, 31, 24, 20, 16])]
+    rug = [(i * 60, m) for i, m in enumerate([1.1, 0.9, 0.6])]
+    assert replay(moon, ex) > 5 and replay(rug, ex) == pytest.approx(0.6 * 0.99, abs=0.01)
+    assert replay(moon, ex) != replay(moon, {**ex, "profit_floors": []})     # floors change the outcome
+    mc = monte_carlo([replay(moon, ex)] + [replay(rug, ex)] * 9, risk_pct=5, trades=50, runs=500)
+    assert 0 <= mc.p_profit <= 1 and mc.final_p5 <= mc.final_median <= mc.final_p95
+
+
+def test_execution_helpers():
+    assert slippage_error({"InstructionError": [3, {"Custom": 6001}]})
+    assert not slippage_error({"InstructionError": [3, {"Custom": 1}]})
+    meta = {"preTokenBalances": [{"owner": "W", "mint": "M", "uiTokenAmount": {"uiAmount": 10}}],
+            "postTokenBalances": [{"owner": "W", "mint": "M", "uiTokenAmount": {"uiAmount": 4}}]}
+    assert balance_delta(meta, "W", "M") == -6
+    posted_ms = 1_794_150_000_123                                  # snowflake encodes the post time to the ms
+    assert tweet_time_from_id(str((posted_ms - 1288834974657) << 22 | 12345)) == pytest.approx(posted_ms / 1000)
+
+
+def test_engagement_scoring_vs_own_baseline():
+    assert engagement_score({"like_count": 0}) == 0
+    assert engagement_score({"like_count": 50_000, "retweet_count": 8_000, "reply_count": 3_000}) > 60
+    pb = PostBuyReview(dict(CFG["postbuy"]))
+    assert pb.judge(10, [60, 70, 65]) == ""                       # not enough history yet
+    assert "isn't catching on" in pb.judge(20, [60, 70, 65, 72, 68])
+    assert pb.judge(55, [60, 70, 65, 72, 68]) == ""
+
+
+def test_alerts_filter_and_dedup(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "x")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    from ctmc.strategy.engine import Event
+    n = Notifier(dict(CFG["notify"]))
+    n.publish(Event(0, "SKIP", "A", "boring"))
+    n.publish(Event(0, "BUY", "A", "bought"))
+    n.publish(Event(0, "BUY", "A", "bought"))                     # duplicate within a minute
+    n.publish(Event(0, "SELL", "A", "RUG ALERT — dev is selling", -50))
+    n.publish(Event(0, "SELL", "A", "RUG ALERT — dev is selling", -50))   # critical: never suppressed
+    assert n.q.qsize() == 3
+
+
+def test_telegram_commands(store, tmp_path):
+    t = stored_trader(store, tmp_path)
+    tc = TelegramControl(t, t.protect, lambda: "summary")
+    run(t.on_tweet(elon_tweet()))
+    assert "MEME" in run(tc.handle("/status"))
+    assert "paused" in run(tc.handle("/pause")) and t.protect.halted()
+    assert "resumed" in run(tc.handle("/resume")) and not t.protect.halted()
+    assert "selling MEME" in run(tc.handle("/sell $meme")) and MINT not in t.positions
+    assert run(tc.handle("/profit")) == "summary"

@@ -16,7 +16,8 @@ import httpx
 from ctmc.models import PairSnapshot
 
 DEX = "https://api.dexscreener.com"
-JUP_PRICE = "https://lite-api.jup.ag/price/v3"
+USDC = "EPjFWJ5DtsqmT6PrCNTP9e3ArWn8GFbQiZgYMg9oWtpc"
+JUP_PRICE = os.getenv("JUPITER_API_URL", "https://api.jup.ag") + "/price/v3"   # needs JUPITER_API_KEY (free tier: 60/min)
 BIRDEYE = "https://public-api.birdeye.so"
 
 
@@ -96,6 +97,22 @@ class Market:
             return None
         return snaps[0]
 
+    async def round_trip(self, mint: str, usd: float) -> float:
+        """Cost of buying `usd` of a coin and selling it straight back, as a fraction (0.03 = 3%).
+        Captures pool fees, price impact and transfer taxes; raises if there is no sell route."""
+        key = os.getenv("JUPITER_API_KEY", "")
+        hdr = {"x-api-key": key} if key else {}
+        base = os.getenv("JUPITER_API_URL", "https://api.jup.ag")
+        q1 = await self.http.get(f"{base}/swap/v1/quote", headers=hdr, params={
+            "inputMint": USDC, "outputMint": mint, "amount": int(usd * 1e6), "slippageBps": 300})
+        q1.raise_for_status()
+        out = int(q1.json()["outAmount"])
+        q2 = await self.http.get(f"{base}/swap/v1/quote", headers=hdr, params={
+            "inputMint": mint, "outputMint": USDC, "amount": out, "slippageBps": 300})
+        q2.raise_for_status()
+        back = int(q2.json()["outAmount"]) / 1e6
+        return max(0.0, 1 - back / usd)
+
     async def search_name(self, keyword: str) -> list[PairSnapshot]:
         """Every coin on our chain whose search hit fits `keyword` (one snapshot per token)."""
         r = await self.http.get(f"{DEX}/latest/dex/search", params={"q": keyword})
@@ -110,7 +127,8 @@ class Market:
         """Jupiter aggregated price (all routes) for up to 50 mints in one call."""
         if not mints:
             return {}
-        r = await self.http.get(JUP_PRICE, params={"ids": ",".join(mints[:50])})
+        key = os.getenv("JUPITER_API_KEY", "")
+        r = await self.http.get(JUP_PRICE, params={"ids": ",".join(mints[:50])}, headers={"x-api-key": key} if key else {})
         r.raise_for_status()
         return {m: float(v["usdPrice"]) for m, v in (r.json() or {}).items() if v and v.get("usdPrice")}
 

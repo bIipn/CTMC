@@ -44,6 +44,11 @@ class Trader:
     rugwatch: object = None
     smart: object = None          # ctmc.kol.signals.SmartMoney
     narrative: object = None      # ctmc.signals.narrative.Narrative
+    store: object = None          # ctmc.storage.Store — crash-safe state + journal
+    protect: object = None        # ctmc.protections.Protections
+    notifier: object = None       # ctmc.notify.Notifier
+    postbuy: object = None        # ctmc.signals.postbuy.PostBuyReview
+    ready: bool = True            # False until startup reconciliation finishes
     positions: dict[str, Position] = field(default_factory=dict)
     events: list[Event] = field(default_factory=list)
     halted: bool = False
@@ -60,13 +65,19 @@ class Trader:
         self.seen: set[tuple[str, str]] = set()          # (tweet id, mint) already handled
         self.lock = asyncio.Lock()
         self._buying: set[str] = set()                    # mints with a buy in flight
+        self._last_tick: dict[str, float] = {}            # mint -> last recorded price-path point
         self.on_watch = lambda mint: None                 # wired to the price feed by the runner
         self.on_unwatch = lambda mint: None
 
     # ── bookkeeping ──────────────────────────────────────────
     def log(self, kind: str, symbol: str, detail: str, pnl: float = 0.0) -> None:
-        self.events.append(Event(time.time(), kind, symbol, detail, pnl))
+        ev = Event(time.time(), kind, symbol, detail, pnl)
+        self.events.append(ev)
         del self.events[:-500]
+        if self.store:
+            self.store.event(ev.ts, kind, symbol, detail, pnl)
+        if self.notifier:
+            self.notifier.publish(ev)                     # queued; never blocks trading
 
     def equity(self) -> float:
         return self.broker.cash + sum(p.value(self.last_px.get(t, p.entry_price)) for t, p in self.positions.items())
@@ -114,8 +125,10 @@ class Trader:
             if (t.id, mint) in self.seen:
                 continue
             self.seen.add((t.id, mint))
+            if self.store:
+                self.store.put("seen", [list(x) for x in list(self.seen)[-1000:]])
             self.backed[mint] = (time.time(), who)
-            await self.try_buy(mint, reason=f"{who} tweeted it", tweet=t)
+            await self.try_buy(mint, reason=f"{who} tweeted it", tweet=t, signal=who)
 
     # ── narrative radar ──────────────────────────────────────
     async def scan_narrative(self, words: list[str], handle: str) -> None:
@@ -155,7 +168,8 @@ class Trader:
             c = self.smart.cluster(mint)
             if self.smart.is_cluster(c):
                 self.narrative.radar.pop(mint, None)
-                await self.try_buy(mint, reason=f"@{coin.handle} '{coin.keyword}' narrative + {c.describe()}")
+                await self.try_buy(mint, reason=f"@{coin.handle} '{coin.keyword}' narrative + {c.describe()}",
+                                   signal=f"narrative:@{coin.handle}")
 
     # ── 2. smart-money wallets ───────────────────────────────
     async def on_kol_trade(self, t) -> None:
@@ -167,14 +181,14 @@ class Trader:
                 return
             if kol.role == "celebrity":
                 self.backed[t.mint] = (time.time(), kol.name)
-                await self.try_buy(t.mint, reason=f"{kol.name}'s own wallet bought it")
+                await self.try_buy(t.mint, reason=f"{kol.name}'s own wallet bought it", signal=f"wallet:{kol.name}")
                 return
             if self.narrative and t.mint in self.narrative.radar:
                 await self.check_radar()
             elif self.smart and self.cfg.get("kol", {}).get("allow_cluster_entries_without_celebrity"):
                 c = self.smart.cluster(t.mint)
                 if self.smart.is_cluster(c):
-                    await self.try_buy(t.mint, reason=f"smart-money cluster: {c.describe()}")
+                    await self.try_buy(t.mint, reason=f"smart-money cluster: {c.describe()}", signal="kol-cluster")
             return
 
         pos = self.positions.get(t.mint)
@@ -190,6 +204,13 @@ class Trader:
             await self.trim(pos, 0.5, f"smart money: {call.reason}")
 
     # ── 3. checks & buying ───────────────────────────────────
+    async def _round_trip(self, mint: str):
+        """Quote buy -> sell for a test size: catches honeypots and hidden taxes before buying."""
+        fn = getattr(self.market, "round_trip", None)
+        if not fn or not self.cfg["checks"].get("round_trip", True):
+            return None
+        return await fn(mint, self.cfg["checks"].get("round_trip_usd", 50))
+
     async def _confluence(self, mint: str):
         if not self.smart:
             return None
@@ -204,8 +225,8 @@ class Trader:
         budget = self.cfg["checks"]["timeout_seconds"]
         started = time.monotonic()
         try:
-            snap, rep, conf = await asyncio.wait_for(asyncio.gather(
-                self.market.snapshot(mint), self.safety.report(mint), self._confluence(mint),
+            snap, rep, conf, trip = await asyncio.wait_for(asyncio.gather(
+                self.market.snapshot(mint), self.safety.report(mint), self._confluence(mint), self._round_trip(mint),
                 return_exceptions=True), budget)
         except asyncio.TimeoutError:
             return Verdict(False, [f"checks took over {budget}s — skipped"]), None, None, ""
@@ -221,6 +242,11 @@ class Trader:
         u = self.passes_universe(snap, prof.get("universe"))
         if not u:
             return u, snap, conf, name
+        max_trip = self.cfg["checks"].get("max_round_trip_cost_pct", 15)
+        if isinstance(trip, Exception):
+            return Verdict(False, [f"no sell route on Jupiter — possible honeypot ({trip.__class__.__name__})"]), snap, conf, name
+        if trip is not None and trip * 100 > max_trip:
+            return Verdict(False, [f"buy-then-sell round trip loses {trip * 100:.1f}% (tax, fees or impact) > {max_trip}%"]), snap, conf, name
         overrides = {**(prof.get("safety") or {}), **({"lp_exempt_market_types": prof["lp_exempt_market_types"]}
                                                         if prof.get("lp_exempt_market_types") else {})}
         v = self.safety.evaluate_solana(rep, overrides)
@@ -252,13 +278,33 @@ class Trader:
             why.append(f"market cap is {ratio:.0f}x its liquidity — too thin to exit")
         return Verdict(not why, why)
 
-    async def try_buy(self, mint: str, reason: str, tweet: Tweet | None = None) -> None:
+    def lateness_scale(self, s: PairSnapshot) -> tuple[float, str]:
+        """Already pumped hard before we saw it? Bet smaller — the easy money may be gone."""
+        c = self.cfg["checks"]
+        if s.change_h1 >= c.get("very_late_pump_pct_1h", 1000):
+            return 0.25, f"already +{s.change_h1:.0f}% this hour → quarter size"
+        if s.change_h1 >= c.get("late_pump_pct_1h", 300):
+            return 0.5, f"already +{s.change_h1:.0f}% this hour → half size"
+        return 1.0, ""
+
+    async def try_buy(self, mint: str, reason: str, tweet: Tweet | None = None, signal: str = "") -> None:
         b = self.cfg["bankroll"]
         if self.halted or mint in self.positions or mint in self.leader_mints or mint in self._buying:
             return
+        if not self.ready:
+            self.log("SKIP", mint[:6], "still starting up (reconciling saved positions) — not buying yet")
+            return
+        gate_scale, gate_note = 1.0, ""
+        if self.protect:
+            gate = self.protect.check_entry(mint, signal)
+            if not gate.ok:
+                self.log("SKIP", mint[:6], gate.reason)
+                return
+            gate_scale, gate_note = gate.scale, gate.reason
         if self.cfg["leader_guard"].get("enabled", True) and self.leaders.entries_blocked():
             lead, chg = self.leaders.worst()
-            self.log("SKIP", mint[:6], f"leaders falling ({lead} {chg:+.1f}%) — not buying into that")
+            why = "leader prices stale — guard is blind" if self.leaders.stale() else f"leaders falling ({lead} {chg:+.1f}%)"
+            self.log("SKIP", mint[:6], f"{why} — not buying into that")
             return
         self._buying.add(mint)
         try:
@@ -269,6 +315,8 @@ class Trader:
                 return
             prof = (self.cfg.get("profiles") or {}).get(profile) or {}
             mult = self.smart.size_multiplier(conf) if (self.smart and conf) else 1.0
+            late, late_note = self.lateness_scale(snap)
+            mult *= late * gate_scale
             async with self.lock:
                 if mint in self.positions:
                     return
@@ -287,17 +335,28 @@ class Trader:
                     self.log("SKIP", sym, f"buy failed: {exc}")
                     return
                 pos = Position(mint, sym, fill.price, fill.qty, fill.usd, source=reason)
-                pos.profile = profile
+                pos.profile, pos.signal = profile, signal
+                pos.entry_latency_s = round(time.time() - tweet.created_at, 2) if tweet else None
                 self.positions[mint] = pos
                 self.last_px[mint] = snap.price_usd
                 self.last_snap[mint] = snap
+                if self.store:
+                    self.store.fill(mint, sym, "buy", fill.qty, fill.usd, fill.price, fill.impact_pct,
+                                    getattr(fill, "signature", ""), reason)
+                    self.store.save_position(pos)
         finally:
             self._buying.discard(mint)
         lag = f" · {time.time() - tweet.created_at:.1f}s after the tweet" if tweet else ""
         mcap = f" · mcap ${snap.market_cap:,.0f} ({profile})" if snap.market_cap else ""
-        smart = f" · {conf.describe()} → size x{mult:g}" if conf is not None else ""
-        self.log("BUY", sym, f"{reason} — ${fill.usd:,.0f} @ {fill.price:.6g}, impact {fill.impact_pct:.2f}%{lag}{mcap}{smart}")
+        smart = f" · {conf.describe()}" if conf is not None else ""
+        notes = "".join(f" · {n}" for n in (late_note, gate_note) if n)
+        self.log("BUY", sym, f"{reason} — ${fill.usd:,.0f} @ {fill.price:.6g}, impact {fill.impact_pct:.2f}%"
+                             f"{lag}{mcap}{smart}{notes} · size x{mult:.2g}")
         self.on_watch(mint)
+        if self.store:
+            self.store.put("cash", self.broker.cash)
+        if self.postbuy:
+            asyncio.create_task(self.postbuy.run(self, pos, tweet))
         if self.smart:
             self.smart.opened(mint, conf)
         if self.rugwatch:
@@ -320,6 +379,9 @@ class Trader:
         pos.peak_price = max(pos.peak_price, px)
         ex = self.cfg["exits"]
         liq = self.last_snap[mint].liquidity_usd if mint in self.last_snap else 0
+        if self.store and time.time() - self._last_tick.get(mint, 0) >= 10:     # price path for the time machine
+            self._last_tick[mint] = time.time()
+            self.store.tick(mint, px)
 
         async with self.lock:
             if mint not in self.positions:
@@ -338,6 +400,10 @@ class Trader:
                 pos.initial_taken |= s.initial
                 if s.rung:
                     pos.ladder_hits.append(s.rung)
+                if self.store:
+                    self.store.fill(mint, pos.symbol, "sell", qty, -fill.usd, fill.price, fill.impact_pct,
+                                    getattr(fill, "signature", ""), s.reason)
+                    self.store.save_position(pos)
                 self.log("SELL", pos.symbol, f"{s.reason} (+${-fill.usd:,.0f})")
                 if s.closes or pos.qty <= 0:
                     self._finish(pos, "fully laddered out")
@@ -345,13 +411,26 @@ class Trader:
 
         drop = (px / pos.peak_price - 1) * 100
         loss = (pos.multiple(px) - 1) * 100
-        if pos.initial_taken and drop <= -ex["crash_trailing_stop_pct"]:
+        floor = self.profit_floor(pos)
+        if floor and pos.multiple(px) < floor:
+            await self.close(pos, f"profit floor: peaked at {pos.peak_price / pos.entry_price:.0f}x, "
+                                  f"now {pos.multiple(px):.1f}x < {floor:g}x floor", urgent=True)
+        elif pos.initial_taken and drop <= -ex["crash_trailing_stop_pct"]:
             await self.close(pos, f"crash backstop: {drop:.0f}% off the peak", urgent=True)
         elif not pos.initial_taken and loss <= -ex["hard_stop_loss_pct"]:
             await self.close(pos, f"hard stop ({loss:.0f}%)", urgent=True)
         elif ex.get("max_hold_hours") and time.time() - pos.opened_at > ex["max_hold_hours"] * 3600:
             await self.close(pos, "max hold time")
+        elif (ex.get("no_2x_exit_hours") and not pos.initial_taken
+              and time.time() - pos.opened_at > ex["no_2x_exit_hours"] * 3600):
+            await self.close(pos, f"max hold: no 2x within {ex['no_2x_exit_hours']}h")
         self._check_daily_limit()
+
+    def profit_floor(self, pos: Position) -> float:
+        """Highest floor earned so far: e.g. peaked at 10x -> never give back below 4x."""
+        peak = pos.peak_price / pos.entry_price if pos.entry_price else 0
+        floors = [f for trig, f in self.cfg["exits"].get("profit_floors", []) if peak >= trig]
+        return max(floors, default=0.0)
 
     # ── 5. flow metrics ──────────────────────────────────────
     def volume_dead(self, pos: Position, s: PairSnapshot) -> bool:
@@ -381,7 +460,7 @@ class Trader:
         backed = self.backed.get(s.token)
         if backed and time.time() - backed[0] < 72 * 3600 and self.flow.capitulation_exhausted(s):
             self.flow.consume(s.token)
-            await self.try_buy(s.token, reason=f"panic flush exhausted (backed by {backed[1]})")
+            await self.try_buy(s.token, reason=f"panic flush exhausted (backed by {backed[1]})", signal=f"dip:{backed[1]}")
 
     # ── exits ────────────────────────────────────────────────
     async def on_rug_alert(self, mint: str, reason: str) -> None:
@@ -404,6 +483,10 @@ class Trader:
                 return
             pos.qty -= qty
             pos.realized_usd += -fill.usd
+            if self.store:
+                self.store.fill(pos.token, pos.symbol, "sell", qty, -fill.usd, fill.price, fill.impact_pct,
+                                getattr(fill, "signature", ""), why)
+                self.store.save_position(pos)
             self.log("SELL", pos.symbol, f"{why} (sold {fraction:.0%}, +${-fill.usd:,.0f})")
 
     async def close(self, pos: Position, why: str, urgent: bool = False) -> None:
@@ -417,13 +500,26 @@ class Trader:
             except TradeError as exc:
                 self.log("HALT", pos.symbol, f"EXIT FAILED — {exc}. Will retry on next tick.")
                 return
+            if self.store:
+                self.store.fill(pos.token, pos.symbol, "sell", pos.qty, -fill.usd, fill.price, fill.impact_pct,
+                                getattr(fill, "signature", ""), why)
             pos.realized_usd += -fill.usd
             pos.qty = 0
             self._finish(pos, why)
 
     def _finish(self, pos: Position, why: str) -> None:
         self.positions.pop(pos.token, None)
-        self.log("SELL", pos.symbol, why, pos.realized_usd - pos.cost_usd)
+        if self.store:
+            self.store.tick(pos.token, self.last_px.get(pos.token, pos.entry_price))
+            self.store.put("cash", self.broker.cash)
+        pnl = pos.realized_usd - pos.cost_usd
+        self.log("SELL", pos.symbol, why, pnl)
+        if self.store:
+            from ctmc.storage import exit_code
+            self.store.close_position(pos, why)
+            if self.protect:
+                for note in self.protect.after_close(pos.token, exit_code(why), pnl):
+                    self.log("HALT", "-", note)
         self.on_unwatch(pos.token)
         if self.rugwatch:
             self.rugwatch.stop(pos.token)
