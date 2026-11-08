@@ -826,7 +826,8 @@ def test_alerts_filter_and_dedup(monkeypatch):
     n.publish(Event(0, "BUY", "A", "bought"))
     n.publish(Event(0, "BUY", "A", "bought"))                     # duplicate within a minute
     n.publish(Event(0, "SELL", "A", "RUG ALERT — dev is selling", -50))
-    n.publish(Event(0, "SELL", "A", "RUG ALERT — dev is selling", -50))   # critical: never suppressed
+    n.publish(Event(0, "SELL", "A", "RUG ALERT — dev is selling", -50))   # exact repeat seconds later: merged
+    n.publish(Event(0, "SELL", "B", "RUG ALERT — liquidity pulled", -80)) # a different critical: always sent
     assert n.q.qsize() == 3
 
 

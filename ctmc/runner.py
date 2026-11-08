@@ -104,14 +104,24 @@ async def run(cfg, live: bool, console: Console) -> None:
             await asyncio.sleep(cfg.monitor.get("equity_snapshot_seconds", 60))
 
     async def guarded(name: str, coro_fn) -> None:
-        while True:  # a crashed feed restarts instead of killing the bot
+        """A crashed feed restarts instead of killing the bot — with backoff, and the same
+        error is logged once (not every few seconds, which would also spam your phone)."""
+        delay, last = 3.0, ""
+        while True:
+            started = asyncio.get_running_loop().time()
             try:
                 await coro_fn()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                trader.log("HALT", name, f"{exc.__class__.__name__}: {exc} — restarting")
-                await asyncio.sleep(3)
+                msg = f"{exc.__class__.__name__}: {exc}"
+                if asyncio.get_running_loop().time() - started > 60:
+                    delay, last = 3.0, ""                     # it ran fine for a while: fresh start
+                if msg != last:
+                    trader.log("HALT", name, f"{msg} — retrying with backoff")
+                    last = msg
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 300)
 
     async def ui_loop(live_ui: Live) -> None:
         while True:

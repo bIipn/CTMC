@@ -54,7 +54,8 @@ class Notifier:
             return
         key = f"{ev.kind}|{ev.symbol}|{ev.detail[:40]}"
         now = time.time()
-        if sev != "critical" and now - self._recent.get(key, 0) < self.r.get("dedup_seconds", 60):
+        window = 10 if sev == "critical" else self.r.get("dedup_seconds", 60)   # critical: only exact repeats merged
+        if now - self._recent.get(key, 0) < window:
             return
         self._recent[key] = now
         try:
