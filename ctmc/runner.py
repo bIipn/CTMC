@@ -12,6 +12,7 @@ from ctmc import report
 from ctmc.dashboard import render
 from ctmc.notify import Notifier, TelegramControl
 from ctmc.protections import Protections
+from ctmc.signals.hackguard import HackGuard
 from ctmc.signals.postbuy import PostBuyReview
 from ctmc.storage import Store
 from ctmc.data.market import Market, PriceFeed
@@ -41,6 +42,13 @@ async def run(cfg, live: bool, console: Console) -> None:
         from ctmc.execution.broker import PaperBroker
         broker = PaperBroker(store.get("cash", cfg.bankroll["starting_usd"]), cfg["execution"])
 
+    if cfg["kol"].get("callers_from_registry", True):              # proven KOLs with X accounts become callers
+        listed = {c["handle"].lower() for c in cfg["celebrities"]}
+        reg0 = Registry(cfg["kol"].get("registry", "data/kols.json")).load()
+        extra = [{"handle": k.x_handle, "id": "", "tier": "caller", "posts_coins": True, "keywords": []}
+                 for k in sorted(reg0.tracked(cfg["kol"]), key=lambda k: -k.weight(cfg["kol"]))
+                 if k.x_handle and k.role != "celebrity" and k.x_handle.lower() not in listed]
+        cfg["celebrities"].extend(extra[: cfg["kol"].get("max_callers_from_registry", 300)])
     id_notes: list[str] = []
     unresolved = await resolve_ids(cfg["celebrities"], http, id_notes.append)   # fill + verify X user IDs
     hype = HypeChecker(cfg["hype"], http)
@@ -48,6 +56,7 @@ async def run(cfg, live: bool, console: Console) -> None:
     trader.ready = False                                           # no buys until saved state is reconciled
     trader.store, trader.protect = store, Protections(cfg["protections"], store)
     trader.postbuy = PostBuyReview(cfg["postbuy"], store, hype, http)
+    trader.hackguard = HackGuard(cfg["hackguard"], store)
     notifier = Notifier(cfg["notify"], http)
     trader.notifier = notifier
     for note in id_notes:

@@ -154,6 +154,26 @@ class SmartMoney:
             return f"smart money is selling into this hype: {c.sellers} proven wallets out vs {c.buyers} in this hour"
         return ""
 
+    async def caller_check(self, handle: str, mint: str) -> tuple[bool, float, str]:
+        """A caller's post only counts with on-chain backing. Their own wallet holding it = skin in
+        the game; their wallet having SOLD it = calling it while dumping on followers."""
+        mult = self.r.get("caller_size_mult", 0.5)
+        kol = next((k for k in self.reg.kols.values() if k.x_handle and k.x_handle.lower() == handle.lower()), None)
+        if kol:
+            now = time.time()
+            if any(t.mint == mint and t.wallet in kol.wallets and t.side == "sell" and now - t.ts <= 3600
+                   for t in reversed(self.tracker.recent)):
+                return False, 0.0, f"@{handle} already sold this coin — calling it while dumping on followers"
+            held = self.tracker.holdings.get(mint, {})
+            if not any(held.get(w, 0) > 0 for w in kol.wallets):
+                await self.tracker.balances_of(mint, kol.wallets)
+            if any(self.tracker.holdings.get(mint, {}).get(w, 0) > 0 for w in kol.wallets):
+                return True, mult, f"@{handle}'s own wallet holds it (skin in the game)"
+        c = self.consensus(mint)
+        if c.holders >= self.r.get("caller_min_proven_holders", 1):
+            return True, mult, f"call backed by {c.holders} proven wallet(s)"
+        return False, 0.0, f"@{handle}'s call has no on-chain backing (their wallet doesn't hold it, no proven wallets in)"
+
     def is_cluster(self, c: Confluence) -> bool:
         return c.count >= self.r.get("cluster_min_wallets", 3) or c.weight >= self.r.get("cluster_min_weight", 1.5)
 

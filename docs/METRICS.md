@@ -16,6 +16,12 @@ Every metric found while reading 16 trading repos, and what CTMC does with it.
 | Exact post time | Snowflake ID: `(id >> 22) + 1288834974657` ms | Latency; reject stale or replayed tweets | ✅ | last30days |
 | Contract address in the post | Text, plus pump.fun / DexScreener / Birdeye / Solscan / Jupiter / GMGN / Photon links | The coin to buy | ✅ | CTMC |
 | Ticker resolution | `$TICKER` must belong to one coin with ≥10x the liquidity of any copycat | Avoid copycats | ✅ | CTMC |
+| Account tiers | celebrity (strong trigger) · caller (needs on-chain backing, half size) · watchdog (exits and bans) | Who counts how much | ✅ | CTMC |
+| Hack guard | Scam-wording score, a celebrity's first-ever coin post, 2 coins/hour burst (callers 4), fresh launch, compromised flag | ok / quarter size / block | ✅ | CTMC |
+| Hack admission | First-person "I was hacked / not me / don't buy" after a coin post | Sell all it triggered | ✅ | CTMC |
+| Trigger post deleted | Re-checked every 45 s for 20 min after buying | Sell now | ✅ | CTMC |
+| Caller backing | Caller's own wallet holds it (skin in the game) / already sold it (dumping) / proven wallets in | Buy half size or skip | ✅ | CTMC |
+| Watchdog flag | A scam hunter posts a coin's address or a held ticker; or reports an account hacked | Sell + 7-day ban / block account | ✅ | CTMC |
 | Narrative keywords | #tags, $tags, quoted names, Capitalised Phrases ("Top G", "Kekius Maximus") | Celebrity-name coin radar | ✅ | CTMC |
 | Engagement at about 1 min | `.55·ln(1+likes) + .25·ln(1+reposts) + .15·ln(1+replies) + .05·ln(1+quotes)`, against that celebrity's own median | Post not catching on → sell half | ✅ | last30days |
 | Grok hype read | Organic or not, credible accounts, red flags (live X search) | After the buy, reduce only | ✅ | CTMC / Vibe-Trading |

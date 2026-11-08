@@ -75,8 +75,18 @@ class CelebrityFilter:
     def __init__(self, celebrities: list[dict], rules: dict):
         self.ids = {str(c["id"]): c["handle"] for c in celebrities if c.get("id")}
         self.unresolved = [c["handle"] for c in celebrities if not c.get("id")]
+        self.tiers = {c["handle"].lower(): c.get("tier", "celebrity") for c in celebrities}
+        self.coin_posters = {c["handle"].lower() for c in celebrities
+                             if c.get("posts_coins", c.get("tier", "celebrity") != "celebrity")}
         self.max_age = rules.get("max_tweet_age_seconds", 20)
         self.ignore_replies = rules.get("ignore_replies", True)
+
+    def tier_of(self, handle: str) -> str:
+        """celebrity (strong trigger) | caller (needs on-chain backing) | watchdog (scam warnings)"""
+        return self.tiers.get(handle.lower(), "celebrity")
+
+    def posts_coins(self, handle: str) -> bool:
+        return handle.lower() in self.coin_posters
 
     def accept(self, t: Tweet) -> tuple[bool, str]:
         if t.author_id not in self.ids:

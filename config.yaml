@@ -116,6 +116,11 @@ kol:
   wallets_per_connection: 100
   recent_trades_kept: 50000
   consensus_window_s: 3600       # crowd read covers the last hour
+  # callers: meme-coin X accounts. A call only counts with on-chain backing.
+  caller_size_mult: 0.5          # half the size of a celebrity trigger
+  caller_min_proven_holders: 1   # ... and needs the caller's own wallet in it, or this many proven wallets
+  callers_from_registry: true    # every proven, followable KOL with an X account is watched as a caller
+  max_callers_from_registry: 300
   # copy-trade bait: fast-flip KOLs pump coins for their copy-traders, then dump on them
   bait_window_s: 120             # fast-flippers bought in the last 2 min ...
   bait_min_wallets: 1
@@ -155,12 +160,26 @@ notify:                      # phone alerts: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_
   kinds: [BUY, SELL, HALT, KOL]   # rug alerts / pauses always come through
   dedup_seconds: 60
 
+hackguard:                   # hacked accounts: the classic X rug
+  caution_score: 2           # out-of-character / mild scam wording -> quarter size, watched closely
+  block_score: 5             # strong scam wording -> no buy
+  first_coin_post_points: 2  # a celebrity's FIRST ever coin post (callers / founders marked posts_coins are exempt)
+  fresh_pool_points: 1       # ... for a coin launched under an hour ago
+  fresh_pool_minutes: 60
+  burst_window_minutes: 60   # a celebrity posting 2 different coins in an hour = compromised
+  caller_burst_coins: 4      # callers post a lot: 4+ different coins in an hour = compromised
+  compromised_hours: 24      # nothing a compromised account posts is bought for this long
+  watchdog_ban_days: 7       # a coin flagged by a watchdog (ZachXBT, Bubblemaps, ...) is sold and banned
+
 postbuy:                     # checks that run AFTER buying — can only reduce risk
   engagement_check: true     # ~1 min after the post: is it catching on vs this celebrity's usual?
   engagement_after_s: 60
   engagement_min_history: 5  # needs 5 of their past coin posts before judging
   engagement_weak_ratio: 0.5 # under half their usual engagement -> sell half
   grok_review: true          # Grok's read of the X hype after buying (needs XAI_API_KEY)
+  deletion_watch: true       # trigger post deleted (hacked posts usually are) -> sell everything now
+  deletion_watch_minutes: 20
+  deletion_poll_s: 45
 
 hype:                        # Grok second opinion (adds 10-30s, so OFF on the instant path)
   confirm_with_grok: false

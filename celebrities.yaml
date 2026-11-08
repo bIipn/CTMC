@@ -1,6 +1,15 @@
 # ─────────────────────────────────────────────────────────────
-#  Who can trigger a buy.  The more the merrier — add freely.
+#  Watched X accounts.  The more the merrier — add freely.
 #
+#  tier      celebrity (default)  their coin post is a strong trigger; strict hack checks
+#                                 (a celebrity's FIRST coin post ever = quarter size)
+#            caller               meme-coin accounts. A call only counts with ON-CHAIN backing:
+#                                 their own wallet holds it, or proven wallets do. If their
+#                                 wallet already SOLD it, they're dumping on followers -> skip.
+#                                 Half size. Every proven KOL with an X account is added as a
+#                                 caller automatically (kol.callers_from_registry).
+#            watchdog             scam hunters. A coin they flag is sold and banned for a week;
+#                                 an account they report hacked is blocked.
 #  handle    X username (no @)
 #  id        numeric X user ID. Leave "" and it's looked up at startup
 #            (needs X_BEARER_TOKEN). With a token, EVERY id is re-checked
@@ -31,17 +40,6 @@
 - { handle: brian_armstrong, id: "",                   keywords: [coinbase, base] }
 - { handle: 0xMert_,         id: "",                   keywords: [mert, helius] }
 
-# ── Solana meme ecosystem voices ──────────────────────────────
-- { handle: pumpdotfun,      id: "",                   keywords: [pumpfun, pump] }
-- { handle: a1lon9,          id: "",                   keywords: [alon] }
-- { handle: blknoiz06,       id: "",                   keywords: [ansem] }
-- { handle: MustStopMurad,   id: "",                   keywords: [murad, spx] }
-- { handle: cobie,           id: "",                   keywords: [cobie] }
-- { handle: HsakaTrades,     id: "",                   keywords: [hsaka] }
-- { handle: notthreadguy,    id: "",                   keywords: [threadguy] }
-- { handle: frankdegods,     id: "",                   keywords: [frank, degods] }
-- { handle: Cupseyy,         id: "",                   keywords: [cupsey] }
-
 # ── Celebrities who launched or pushed coins ──────────────────
 - { handle: Cobratate,       id: "",                   keywords: [tate, topg, cobra, hustlers, matrix, bugatti] }
 - { handle: TateTheTalisman, id: "",                   keywords: [tristan, tristantate, talisman] }
@@ -59,3 +57,42 @@
 - { handle: KimKardashian,   id: "",                   keywords: [kardashian, kim] }
 - { handle: ParisHilton,     id: "",                   keywords: [paris, hilton] }
 - { handle: Drake,           id: "",                   keywords: [drake, ovo] }
+
+# ── Callers: accounts that post meme coins (need on-chain backing) ──
+# Verify handles yourself; a wrong one is simply skipped (logged at startup).
+- { handle: blknoiz06,       id: "", tier: caller, keywords: [ansem] }
+- { handle: MustStopMurad,   id: "", tier: caller, keywords: [murad, spx] }
+- { handle: cobie,           id: "", tier: caller }
+- { handle: HsakaTrades,     id: "", tier: caller }
+- { handle: notthreadguy,    id: "", tier: caller }
+- { handle: frankdegods,     id: "", tier: caller }
+- { handle: Cupseyy,         id: "", tier: caller }
+- { handle: a1lon9,          id: "", tier: caller }
+- { handle: pumpdotfun,      id: "", tier: caller }
+- { handle: CryptoKaleo,     id: "", tier: caller }
+- { handle: inversebrah,     id: "", tier: caller }
+- { handle: CryptoGodJohn,   id: "", tier: caller }
+- { handle: Pentosh1,        id: "", tier: caller }
+- { handle: CryptoCobain,    id: "", tier: caller }
+- { handle: KookCapitalLLC,  id: "", tier: caller }
+- { handle: gainzy222,       id: "", tier: caller }
+- { handle: icebergy_,       id: "", tier: caller }
+- { handle: JamesWynnReal,   id: "", tier: caller }
+- { handle: orangie,         id: "", tier: caller }
+- { handle: 0xSisyphus,      id: "", tier: caller }
+- { handle: CryptoDonAlt,    id: "", tier: caller }
+- { handle: TheCryptoDog,    id: "", tier: caller }
+- { handle: ZssBecker,       id: "", tier: caller }
+- { handle: Ashcryptoreal,   id: "", tier: caller }
+- { handle: DegenSpartan,    id: "", tier: caller }
+- { handle: Rewkang,         id: "", tier: caller }
+- { handle: lookonchain,     id: "", tier: caller }
+- { handle: SolanaFloor,     id: "", tier: caller }
+
+# ── Watchdogs: scam hunters (never trigger buys — they trigger exits) ──
+- { handle: zachxbt,         id: "", tier: watchdog }
+- { handle: bubblemaps,      id: "", tier: watchdog }
+- { handle: rugcheckxyz,     id: "", tier: watchdog }
+- { handle: PeckShieldAlert, id: "", tier: watchdog }
+- { handle: CertiKAlert,     id: "", tier: watchdog }
+- { handle: realScamSniffer, id: "", tier: watchdog }

@@ -997,3 +997,125 @@ def test_discovery_finds_repeat_winners():
     assert profits == {"PRO": 5.0, "BAG": -1.5}
     picks = pick_candidates({"T1": {"PRO": 5.0, "BAG": -1.5}, "T2": {"PRO": 2.0, "ONE": 9.0}}, min_tokens=2, min_profit_sol=1)
     assert [c.wallet for c in picks] == ["PRO"] and picks[0].profit_sol == 7.0
+
+
+# ── hacked accounts, callers, watchdogs ──────────────────────
+from ctmc.signals.hackguard import ADMISSIONS, HackGuard, scam_score  # noqa: E402
+from ctmc.signals.postbuy import tweet_gone  # noqa: E402
+
+CALLER_ID, WATCHDOG_ID = "777", "888"
+TIERED = CFG["celebrities"] + [{"handle": "CallerX", "id": CALLER_ID, "tier": "caller"},
+                               {"handle": "SleuthX", "id": WATCHDOG_ID, "tier": "watchdog"}]
+MINT2 = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+
+
+def guarded_trader(market=None, smart=None):
+    cfg = dict(CFG, celebrities=TIERED, exits=dict(CFG["exits"], est_sell_fee_usd=0))
+    t = Trader(cfg, PaperBroker(1000, dict(CFG["execution"], paper_fee_pct=0, network_fee_usd=0)),
+               market or FakeMarket(), FakeSafety())
+    t.hackguard = HackGuard(dict(CFG["hackguard"]))
+    t.smart = smart
+    return t
+
+
+def tweet_from(author, text):
+    return Tweet(id=str(time.time_ns()), author_id=author, text=text, created_at=time.time())
+
+
+def test_scam_wording_and_admissions():
+    score, found = scam_score("Our official token presale is LIVE — connect wallet to claim your tokens t.me/x")
+    assert score >= 10 and "presale" in found and "connect your wallet" in found
+    assert ADMISSIONS.search("my account was hacked, don't buy anything") and not ADMISSIONS.search("gm, love doge")
+    assert not ADMISSIONS.search("lol @someone got hacked again")                 # third-person: not an admission
+
+
+def test_first_coin_post_from_a_celebrity_is_quarter_size():
+    t = guarded_trader()
+    run(t.on_tweet(elon_tweet()))
+    p = t.positions[MINT]
+    assert p.cost_usd == pytest.approx(25) and "first coin @elonmusk has ever posted" in t.events[-1].detail
+
+
+def test_two_coins_in_an_hour_means_hacked():
+    t = guarded_trader()
+    run(t.on_tweet(elon_tweet()))
+    run(t.on_tweet(elon_tweet(f"and this one pump.fun/coin/{MINT2}")))
+    assert MINT2 not in t.positions and "classic hacked-account pattern" in t.events[-1].detail
+    assert t.hackguard.compromised("elonmusk")
+
+
+def test_scam_wording_blocks_the_buy():
+    t = guarded_trader()
+    run(t.on_tweet(elon_tweet(f"presale live, connect wallet and claim your tokens: pump.fun/coin/{MINT}")))
+    assert not t.positions and "possible hacked account" in t.events[-1].detail
+
+
+def test_hacked_admission_dumps_positions_from_that_account():
+    t = guarded_trader()
+    run(t.on_tweet(elon_tweet()))
+    run(t.on_tweet(elon_tweet("My account was hacked — do not buy anything posted today")))
+    assert MINT not in t.positions and "was hacked" in [e for e in t.events if e.kind == "SELL"][-1].detail
+    run(t.on_tweet(elon_tweet(f"real one pump.fun/coin/{MINT2}")))
+    assert MINT2 not in t.positions and "compromised" in t.events[-1].detail
+
+
+def test_watchdog_flag_sells_and_bans_the_coin():
+    t = guarded_trader()
+    run(t.on_tweet(elon_tweet()))
+    run(t.on_tweet(tweet_from(WATCHDOG_ID, f"Insiders hold 60% of {MINT}. Avoid.")))
+    assert MINT not in t.positions and "watchdog @SleuthX flagged" in [e for e in t.events if e.kind == "SELL"][-1].detail
+    t.positions.clear()
+    run(t.try_buy(MINT, "test"))
+    assert MINT not in t.positions and "banned" in t.events[-1].detail
+
+
+def test_watchdog_hack_report_blocks_the_account():
+    t = guarded_trader()
+    run(t.on_tweet(elon_tweet()))
+    run(t.on_tweet(tweet_from(WATCHDOG_ID, "PSA: @elonmusk appears hacked, the CA they posted is a scam")))
+    assert MINT not in t.positions and t.hackguard.compromised("elonmusk")
+
+
+def _caller_setup(holds=None, sold=False):
+    caller = Kol("CallerX", ["WCALL"], x_handle="CallerX", stats=KolStats(win_rate=66, pnl_30d_usd=90_000,
+                                                                            median_hold_s=5400, trades_7d=200))
+    sm = _smart(caller, holds=holds)
+    if sold:
+        run(sm.tracker.record(_trade(caller, "sell", sol=3, ago=300)))
+    return guarded_trader(smart=sm), sm
+
+
+def test_caller_with_skin_in_the_game_buys_half_size():
+    t, sm = _caller_setup(holds={"WCALL": 50_000})
+    run(t.on_tweet(tweet_from(CALLER_ID, f"aping this pump.fun/coin/{MINT}")))
+    p = t.positions[MINT]
+    boost = sm.size_multiplier(run(sm.confluence(MINT)))              # their wallet is proven smart money too
+    assert p.cost_usd == pytest.approx(100 * boost * 0.5) and "own wallet holds it" in t.events[-1].detail
+
+
+def test_caller_dumping_on_followers_is_skipped():
+    t, _ = _caller_setup(sold=True)
+    run(t.on_tweet(tweet_from(CALLER_ID, f"next 100x pump.fun/coin/{MINT}")))
+    assert MINT not in t.positions and "dumping on followers" in t.events[-1].detail
+
+
+def test_caller_without_backing_is_skipped():
+    t, _ = _caller_setup()
+    run(t.on_tweet(tweet_from(CALLER_ID, f"look at this pump.fun/coin/{MINT}")))
+    assert MINT not in t.positions and "no on-chain backing" in t.events[-1].detail
+
+
+def test_callers_may_post_several_coins_but_not_a_flood():
+    g = HackGuard(dict(CFG["hackguard"]))
+    for i in range(3):
+        g.record_coin_post("CallerX", f"M{i}")
+    assert g.assess("CallerX", "gm", "M9", posts_coins=True).level != "block"
+    g.record_coin_post("CallerX", "M3")
+    assert g.assess("CallerX", "gm", "M9", posts_coins=True).level == "block"
+
+
+def test_deleted_post_detection():
+    assert tweet_gone(404, None)
+    assert tweet_gone(200, {"errors": [{"title": "Not Found Error", "detail": "Could not find tweet"}]})
+    assert not tweet_gone(200, {"data": {"id": "1"}})
+    assert not tweet_gone(429, None)                     # rate limited is NOT deleted

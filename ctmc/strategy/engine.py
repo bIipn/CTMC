@@ -48,6 +48,7 @@ class Trader:
     protect: object = None        # ctmc.protections.Protections
     notifier: object = None       # ctmc.notify.Notifier
     postbuy: object = None        # ctmc.signals.postbuy.PostBuyReview
+    hackguard: object = None      # ctmc.signals.hackguard.HackGuard
     ready: bool = True            # False until startup reconciliation finishes
     positions: dict[str, Position] = field(default_factory=dict)
     events: list[Event] = field(default_factory=list)
@@ -67,6 +68,7 @@ class Trader:
         self._buying: set[str] = set()                    # mints with a buy in flight
         self._last_tick: dict[str, float] = {}            # mint -> last recorded price-path point
         self._trip: dict[str, float | None] = {}          # mint -> measured buy+sell round-trip cost
+        self.blacklist: dict[str, tuple[float, str]] = {}  # mint -> (until, why): watchdog-flagged coins
         self.on_watch = lambda mint: None                 # wired to the price feed by the runner
         self.on_unwatch = lambda mint: None
 
@@ -102,8 +104,15 @@ class Trader:
         if not ok:
             return
         who = f"@{t.handle}"
+        tier = self.celebs.tier_of(t.handle)
+        if self.hackguard and tier != "watchdog" and self.hackguard.admission(t.handle, t.text):
+            await self.account_compromised(t.handle, "the account itself said it was hacked / the coin is fake")
+            return
         coins = extract_coins(t.text)
-        if self.narrative:
+        if tier == "watchdog":
+            await self.on_watchdog(t, coins)
+            return
+        if self.narrative and tier == "celebrity":           # narratives come from celebrities, not callers
             words = self.narrative.on_tweet(t.handle, t.text)
             if words and self.cfg.get("narrative", {}).get("search_on_tweet", True):
                 asyncio.create_task(self.scan_narrative(words, t.handle))
@@ -129,7 +138,44 @@ class Trader:
             if self.store:
                 self.store.put("seen", [list(x) for x in list(self.seen)[-1000:]])
             self.backed[mint] = (time.time(), who)
-            await self.try_buy(mint, reason=f"{who} tweeted it", tweet=t, signal=who)
+            verb = "tweeted it" if tier == "celebrity" else "called it"
+            await self.try_buy(mint, reason=f"{who} {verb}", tweet=t, signal=who, tier=tier)
+            if self.hackguard:
+                self.hackguard.record_coin_post(t.handle, mint)      # after the check: bursts need history
+
+    async def account_compromised(self, handle: str, why: str) -> None:
+        """Hacked account: block it and dump everything that came from its posts."""
+        who = f"@{handle}"
+        if self.hackguard:
+            self.hackguard.mark_compromised(handle, why)
+        self.log("HALT", who, f"looks hacked ({why}) — blocking it and selling everything it triggered")
+        for p in [p for p in self.positions.values() if p.signal == who]:
+            await self.close(p, f"RUG ALERT — {who} was hacked ({why})", urgent=True)
+
+    async def on_watchdog(self, t: Tweet, coins) -> None:
+        """Scam hunters (ZachXBT, Bubblemaps, ...): a coin they flag is sold and banned."""
+        import re as _re
+        who, now = f"@{t.handle}", time.time()
+        if "hack" in t.text.lower():
+            watched = {h.lower() for h in self.celebs.tiers}
+            for m in _re.findall(r"@([A-Za-z0-9_]{1,15})", t.text):
+                if m.lower() in watched and self.celebs.tier_of(m) != "watchdog":
+                    await self.account_compromised(m, f"{who} reported it hacked")
+        held = {p.symbol.upper(): p.token for p in self.positions.values()}
+        hits = set(coins.mints) | {held[tk] for tk in coins.tickers if tk in held}
+        if not hits:
+            return
+        self.log("TWEET", who, "watchdog: " + ((t.text[:90] + "…") if len(t.text) > 90 else t.text))
+        days = self.cfg.get("hackguard", {}).get("watchdog_ban_days", 7)
+        for mint in hits:
+            self.blacklist[mint] = (now + days * 86400, f"flagged by {who}")
+            if self.store:
+                self.store.lock(f"mint:{mint}", now + days * 86400, f"flagged by watchdog {who}")
+            if self.narrative:
+                self.narrative.radar.pop(mint, None)
+            pos = self.positions.get(mint)
+            if pos:
+                await self.close(pos, f"RUG ALERT — watchdog {who} flagged this coin", urgent=True)
 
     # ── narrative radar ──────────────────────────────────────
     async def scan_narrative(self, words: list[str], handle: str) -> None:
@@ -310,12 +356,17 @@ class Trader:
             return 0.5, f"already +{s.change_h1:.0f}% this hour → half size"
         return 1.0, ""
 
-    async def try_buy(self, mint: str, reason: str, tweet: Tweet | None = None, signal: str = "") -> None:
+    async def try_buy(self, mint: str, reason: str, tweet: Tweet | None = None, signal: str = "",
+                      tier: str = "celebrity") -> None:
         b = self.cfg["bankroll"]
         if self.halted or mint in self.positions or mint in self.leader_mints or mint in self._buying:
             return
         if not self.ready:
             self.log("SKIP", mint[:6], "still starting up (reconciling saved positions) — not buying yet")
+            return
+        banned = self.blacklist.get(mint)
+        if banned and banned[0] > time.time():
+            self.log("SKIP", mint[:6], f"banned: {banned[1]}")
             return
         gate_scale, gate_note = 1.0, ""
         if self.protect:
@@ -341,10 +392,28 @@ class Trader:
                 if objection:
                     self.log("SKIP", sym, objection)
                     return
+            hack_scale, hack_note = 1.0, ""
+            if self.hackguard and tweet is not None:
+                hv = self.hackguard.assess(tweet.handle, tweet.text, mint, self.celebs.posts_coins(tweet.handle),
+                                           snap.age_minutes if snap.created_at_ms else None)
+                if hv.level == "block":
+                    self.log("SKIP", sym, "possible hacked account: " + "; ".join(hv.reasons))
+                    return
+                if hv.level == "caution":
+                    hack_scale, hack_note = hv.scale, "hack caution, quarter size: " + "; ".join(hv.reasons)
+            caller_scale, caller_note = 1.0, ""
+            if tier == "caller":
+                if not self.smart:
+                    self.log("SKIP", sym, "caller posts need the smart-money layer to confirm them")
+                    return
+                ok, caller_scale, caller_note = await self.smart.caller_check(tweet.handle if tweet else "", mint)
+                if not ok:
+                    self.log("SKIP", sym, caller_note)
+                    return
             prof = (self.cfg.get("profiles") or {}).get(profile) or {}
             mult = self.smart.size_multiplier(conf) if (self.smart and conf) else 1.0
             late, late_note = self.lateness_scale(snap)
-            mult *= late * gate_scale
+            mult *= late * gate_scale * hack_scale * caller_scale
             async with self.lock:
                 if mint in self.positions:
                     return
@@ -384,7 +453,7 @@ class Trader:
         smart = f" · {conf.describe()}" if conf is not None else ""
         if self.smart:
             smart += f" · {self.smart.consensus(mint).describe()}"
-        notes = "".join(f" · {n}" for n in (late_note, gate_note, cost_note) if n)
+        notes = "".join(f" · {n}" for n in (late_note, gate_note, cost_note, hack_note, caller_note) if n)
         self.log("BUY", sym, f"{reason} — ${fill.usd:,.0f} @ {fill.price:.6g}, impact {fill.impact_pct:.2f}%"
                              f"{lag}{mcap}{smart}{notes} · size x{mult:.2g}")
         self.on_watch(mint)

@@ -17,9 +17,27 @@ takes its stake back at 2x, and lets the rest ride a profit ladder until the vol
 
 | Trigger | What happens |
 |---|---|
-| **A celebrity posts a coin** | **41 accounts** in `celebrities.yaml` (add freely), pushed live from X. Verified by numeric user ID, so a fake or renamed account can't trigger it. The contract address comes from the text or any pump.fun / DexScreener / Birdeye / Solscan / Jupiter / GMGN link. |
+| **A celebrity posts a coin** | **66 accounts** in `celebrities.yaml` (add freely): celebrities, meme-coin **callers**, and scam **watchdogs**. Pushed live from X. Verified by numeric user ID, so a fake or renamed account can't trigger it. The contract address comes from the text or any pump.fun / DexScreener / Birdeye / Solscan / Jupiter / GMGN link. |
 | **A celebrity's own wallet buys** | As strong as a tweet. Add their known wallets with `kols add --celebrity`. |
 | **Celebrity-name narrative** (the Andrew Tate effect) | Any post from a watched celebrity puts them "hot" for 12h. New pump.fun launches and DEX search results named after them or their words ("Top G", "Kekius Maximus") go on a **radar**. A radar coin is bought only once **3+ proven wallets** pile in. A name match alone is never enough. |
+
+### Hacked accounts, callers and watchdogs
+
+Hacked famous accounts posting scam coins are one of the most common X rugs, so every coin post is checked:
+
+| Defence | Rule |
+|---|---|
+| **Scam wording** | presale · airdrop · "claim your tokens" · "connect wallet" · Telegram invites · giveaways. Strong → no buy |
+| **Out of character** | A celebrity's **first ever** coin post → quarter size, watched closely |
+| **Burst** | A celebrity posting **2 different coins in an hour** (callers: 4) → account treated as hacked for 24h |
+| **Admission** | The account then says "I was hacked" / "not me" / "don't buy" → everything it triggered is sold, now |
+| **Deleted post** | The trigger post disappears in the first 20 min (hacked posts usually do) → sell, now |
+| **Watchdogs** | ZachXBT, Bubblemaps, RugCheck, PeckShield, CertiK, ScamSniffer: a coin they flag is sold and banned for 7 days; an account they report hacked is blocked |
+
+**Callers** (meme-coin accounts) never trigger a buy on their own word. A call counts only with **on-chain backing**:
+the caller's own wallet holds the coin, or proven wallets do. If their wallet already **sold** it, they're dumping on
+followers, so the bot skips it. Caller trades are half size. Every proven, followable KOL with an X account is
+watched as a caller automatically, so their wallet record decides how much their posts count.
 
 ### Checks: all at once, 4-second limit, no data = no trade
 
@@ -120,7 +138,7 @@ python -m ctmc test-tweet "<text>" --as elonmusk      # what the bot would do wi
 python -m ctmc report [--days 30]                     # performance by celebrity, exit rule, profile
 python -m ctmc simulate --compare                     # time machine: replay your exits 10,000x
 python -m ctmc pause | resume                         # kill switch (also /pause, /resume on Telegram)
-python -m pytest -q                                   # 79 scenario tests
+python -m pytest -q                                   # 91 scenario tests
 ```
 
 **Telegram:** `/status` `/profit` `/pause` `/resume` `/sellall` `/sell SYMBOL`. Only your chat ID is accepted.
