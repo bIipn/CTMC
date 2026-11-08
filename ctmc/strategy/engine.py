@@ -37,6 +37,7 @@ class Trader:
     market: object
     safety: object
     hype: object = None
+    rugwatch: object = None
     positions: dict[str, Position] = field(default_factory=dict)
     events: list[Event] = field(default_factory=list)
     halted: bool = False
@@ -129,6 +130,9 @@ class Trader:
             why.append(f"1h volume ${s.volume_h1:,.0f} too low")
         if s.age_minutes < u.get("min_pair_age_minutes", 0):
             why.append(f"pool only {s.age_minutes:.0f} min old")
+        ratio = s.market_cap / s.liquidity_usd if s.liquidity_usd else float("inf")
+        if s.market_cap and ratio > u.get("max_mcap_to_liquidity", float("inf")):
+            why.append(f"market cap is {ratio:.0f}x its liquidity — too thin to exit")
         return Verdict(not why, why)
 
     async def try_buy(self, mint: str, reason: str, tweet: Tweet | None = None) -> None:
@@ -168,6 +172,9 @@ class Trader:
         lag = f" · {time.time() - tweet.created_at:.1f}s after the tweet" if tweet else ""
         self.log("BUY", sym, f"{reason} — ${fill.usd:,.0f} @ {fill.price:.6g}, impact {fill.impact_pct:.2f}%{lag}")
         self.on_watch(mint)
+        if self.rugwatch:
+            report = getattr(self.safety, "last_report", {}).get(mint)
+            asyncio.create_task(self.rugwatch.start(mint, report))
 
     # ── 2. prices ────────────────────────────────────────────
     async def on_price(self, mint: str, px: float) -> None:
@@ -233,6 +240,10 @@ class Trader:
         self.flow.observe(s)
         pos = self.positions.get(s.token)
         if pos:
+            if self.rugwatch:
+                await self.rugwatch.on_metrics(s)          # may fire on_rug_alert -> urgent exit
+                if s.token not in self.positions:
+                    return
             if self.volume_dead(pos, s):
                 await self.close(pos, "volume died — the party's over")
             elif self.flow.distribution(s) and pos.multiple(s.price_usd) > 1.0:
@@ -245,6 +256,11 @@ class Trader:
             await self.try_buy(s.token, reason=f"panic flush exhausted (backed by {backed[1]})")
 
     # ── exits ────────────────────────────────────────────────
+    async def on_rug_alert(self, mint: str, reason: str) -> None:
+        pos = self.positions.get(mint)
+        if pos:
+            await self.close(pos, f"RUG ALERT — {reason}", urgent=True)
+
     async def close(self, pos: Position, why: str, urgent: bool = False) -> None:
         async with self.lock:
             if pos.token not in self.positions or pos.qty <= 0:
@@ -264,3 +280,5 @@ class Trader:
         self.positions.pop(pos.token, None)
         self.log("SELL", pos.symbol, why, pos.realized_usd - pos.cost_usd)
         self.on_unwatch(pos.token)
+        if self.rugwatch:
+            self.rugwatch.stop(pos.token)

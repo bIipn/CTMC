@@ -12,6 +12,7 @@ from ctmc.dashboard import render
 from ctmc.data.market import Market, PriceFeed
 from ctmc.feeds.twitter import WebhookSource, make_source
 from ctmc.safety.checker import SafetyChecker
+from ctmc.safety.rugwatch import RugWatch
 from ctmc.signals.hype import HypeChecker
 from ctmc.strategy.engine import Trader
 
@@ -29,6 +30,10 @@ async def run(cfg, live: bool, console: Console) -> None:
 
     trader = Trader(cfg, broker, market, SafetyChecker(cfg["safety"], cfg["clusters"], http),
                     HypeChecker(cfg["hype"], http))
+    rugwatch = None
+    if cfg["rugwatch"].get("enabled", True):
+        rugwatch = RugWatch(cfg["rugwatch"], on_alert=lambda m, why: trader.on_rug_alert(m, why), http=http)
+        trader.rugwatch = rugwatch
     feed = PriceFeed(market, cfg.monitor["price_refresh_seconds"])
     feed.watch.update(cfg.leaders.values())
     trader.on_watch = feed.watch.add
@@ -67,6 +72,7 @@ async def run(cfg, live: bool, console: Console) -> None:
             asyncio.create_task(guarded("tweets", lambda: source.run(trader.on_tweet))),
             asyncio.create_task(guarded("prices", lambda: feed.run(trader.on_price))),
             asyncio.create_task(guarded("flow", metrics_loop)),
+            *([asyncio.create_task(guarded("rugwatch", rugwatch.run))] if rugwatch else []),
             asyncio.create_task(ui_loop(live_ui)),
         ]
         try:

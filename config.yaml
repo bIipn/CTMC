@@ -47,16 +47,22 @@ universe:
   min_liquidity_usd: 75000       # summed across every DEX pool
   min_volume_1h_usd: 50000
   min_pair_age_minutes: 0        # celebrity plays are often new; safety + clusters do the protecting
+  max_mcap_to_liquidity: 30      # market cap / pooled liquidity; higher = a few sells crater it
 
 safety:
   require_mint_authority_revoked: true
   require_freeze_authority_revoked: true
   min_lp_locked_or_burned_pct: 90
-  max_top10_holders_pct: 30
+  max_top10_holders_pct: 30        # pools, lockers and exchanges excluded
   max_single_holder_pct: 8
   max_insider_cluster_pct: 15
   max_rugcheck_score: 1000
-  max_sell_tax_pct: 5
+  max_transfer_fee_pct: 0          # any tax on transfers = reject
+  block_token2022_extensions: [permanentDelegate, transferHook, nonTransferable, defaultAccountState]
+  reject_mutable_metadata: false   # mutable name/image is a warning, not a reject
+  min_holders: 200
+  max_dev_holding_pct: 5           # creator wallet's share of supply
+  max_creator_tokens: 10           # creator launched more than this = serial launcher
 
 clusters:                    # bubble-map style: which top holders were funded by the same wallet
   enabled: true
@@ -64,6 +70,16 @@ clusters:                    # bubble-map style: which top holders were funded b
   max_cluster_pct: 12        # one funder's wallets together may hold at most this
   max_dev_linked_pct: 5      # wallets funded by / funding the creator
   max_signatures_scan: 1000  # older, busier wallets are treated as independent
+
+rugwatch:                    # after buying: watch for the rug in real time
+  enabled: true
+  lp_pull_pct: 25            # liquidity removed beyond what the price move explains
+  lp_window_seconds: 60
+  dev_sell_pct: 10           # creator sells this share of their bag -> out
+  min_dev_pct_to_watch: 0.1  # ignore a dev holding dust
+  watch_top_holders: 10
+  whale_supply_dumped_pct: 5 # top holders together dump this share of supply -> out
+  poll_seconds: 5            # balance polling while the websocket is down
 
 hype:                        # Grok second opinion (adds 10-30s, so OFF on the instant path)
   confirm_with_grok: false

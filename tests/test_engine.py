@@ -266,3 +266,141 @@ def test_hype_rules():
     h = HypeChecker(CFG["hype"])
     assert not h.evaluate({"hype_score": 90, "organic": False, "credible_accounts": ["@a", "@b"]})
     assert h.evaluate({"hype_score": 80, "organic": True, "credible_accounts": ["@a", "@b"]})
+
+
+# ── deeper Solana safety ─────────────────────────────────────
+def _clean_report(**over):
+    rep = {"mintAuthority": None, "freezeAuthority": None, "score_normalised": 5, "totalHolders": 5000,
+           "markets": [{"pubkey": "POOL", "lp": {"lpLockedPct": 100}}],
+           "topHolders": [{"owner": "POOL", "pct": 40}] + [{"owner": f"w{i}", "pct": 2} for i in range(10)]}
+    rep.update(over)
+    return rep
+
+
+@pytest.mark.parametrize("over, needle", [
+    ({"transferFee": {"pct": 5}}, "transfer fee"),
+    ({"token_extensions": {"permanentDelegate": {"delegate": "X"}}}, "permanent delegate"),
+    ({"token_extensions": {"transferHook": {"programId": "Y"}}}, "transfer hook"),
+    ({"creator": "DEV", "topHolders": [{"owner": "DEV", "pct": 7}]}, "dev wallet still holds 7.0%"),
+    ({"creatorTokens": [{"mint": str(i)} for i in range(25)]}, "serial launcher"),
+    ({"totalHolders": 40}, "only 40 holders"),
+])
+def test_solana_traps_are_rejected(over, needle):
+    v = SafetyChecker(CFG["safety"]).evaluate_solana(_clean_report(**over))
+    assert not v.ok and needle in " ".join(v.reasons)
+
+
+def test_clean_token_passes_and_mutable_metadata_is_only_a_note():
+    v = SafetyChecker(CFG["safety"]).evaluate_solana(_clean_report(tokenMeta={"mutable": True}))
+    assert v.ok and "mutable" in v.reasons[0]
+
+
+def test_labelled_pools_excluded_but_random_addresses_still_counted():
+    # an ordinary wallet whose address happens to contain "lp" / "pump" must still be counted
+    holders = [{"owner": "Ab3lpQ9pumpZ", "pct": 12}, {"owner": "LOCKERADDR", "pct": 50}]
+    rep = _clean_report(topHolders=holders, knownAccounts={"LOCKERADDR": {"name": "Streamflow", "type": "LOCKER"}})
+    v = SafetyChecker(CFG["safety"]).evaluate_solana(rep)
+    assert not v.ok and "single wallet holds 12.0%" in " ".join(v.reasons)
+    assert "50.0%" not in " ".join(v.reasons)
+
+
+def test_market_cap_far_above_liquidity_is_rejected():
+    s = snap(liq=100_000)
+    s.market_cap = 10_000_000          # 100x its liquidity
+    v = trader().passes_universe(s)
+    assert not v.ok and "100x its liquidity" in " ".join(v.reasons)
+
+
+# ── post-buy rug watch ───────────────────────────────────────
+from ctmc.safety.rugwatch import RugWatch, liquidity_removed  # noqa: E402
+
+
+def test_liquidity_math_separates_price_moves_from_lp_pulls():
+    # price quarters, liquidity halves -> exactly what a constant-product pool does: nothing removed
+    assert liquidity_removed((1_000_000, 1.0), (500_000, 0.25)) == pytest.approx(0)
+    # price flat, liquidity -70% -> 70% removed
+    assert liquidity_removed((1_000_000, 1.0), (300_000, 1.0)) == pytest.approx(0.7)
+
+
+def _watch(alerts):
+    async def on_alert(mint, why):
+        alerts.append(why)
+    return RugWatch(CFG["rugwatch"], on_alert)
+
+
+def test_lp_pull_fires_but_a_plain_crash_does_not():
+    alerts = []
+    w = _watch(alerts)
+
+    async def go():
+        await w.start(MINT, None)
+        await w.on_metrics(snap(1.0, liq=1_000_000))
+        await w.on_metrics(snap(0.25, liq=500_000))      # crash, LP intact
+        assert not alerts
+        await w.on_metrics(snap(0.25, liq=100_000))      # LP yanked
+    run(go())
+    assert alerts and "liquidity pulled" in alerts[0]
+
+
+def _report():
+    return {"creator": "DEV", "token": {"supply": 1_000_000_000 * 10**6, "decimals": 6},
+            "topHolders": [{"owner": f"whale{i}", "address": f"acct{i}", "pct": 3, "uiAmount": 30_000_000}
+                           for i in range(3)]}
+
+
+def test_dev_selling_fires_instantly():
+    alerts = []
+    w = _watch(alerts)
+
+    async def fake_accounts(owner, mint):
+        return {"devacct": 50_000_000.0}                  # dev holds 5% of supply
+    w._token_accounts = fake_accounts
+
+    async def go():
+        await w.start(MINT, _report())
+        await w.on_balance("devacct", 49_000_000)         # 2% of the bag: below trigger
+        assert not alerts
+        await w.on_balance("devacct", 40_000_000)         # 20% of the bag
+    run(go())
+    assert alerts and "DEV IS SELLING" in alerts[0]
+
+
+def test_whales_dumping_fires():
+    alerts = []
+    w = _watch(alerts)
+
+    async def no_dev(owner, mint):
+        return {}
+    w._token_accounts = no_dev
+
+    async def go():
+        await w.start(MINT, _report())
+        for i in range(3):                                # each sells 60% of 3% of supply = 5.4% total
+            await w.on_balance(f"acct{i}", 12_000_000)
+    run(go())
+    assert alerts and "3 top holders sold 5.4% of supply" in alerts[0]
+
+
+def test_websocket_messages_drive_balance_updates():
+    alerts = []
+    w = _watch(alerts)
+
+    async def fake_accounts(owner, mint):
+        return {"devacct": 50_000_000.0}
+    w._token_accounts = fake_accounts
+
+    async def go():
+        await w.start(MINT, _report())
+        w._req[7] = "devacct"
+        await w.handle_message({"jsonrpc": "2.0", "id": 7, "result": 4242})          # subscribed
+        await w.handle_message({"method": "accountNotification", "params": {
+            "subscription": 4242, "result": {"value": {"lamports": 0, "data": ["", "base64"]}}}})  # account closed
+    run(go())
+    assert alerts and "DEV IS SELLING" in alerts[0] and "100%" in alerts[0]
+
+
+def test_rug_alert_dumps_the_position():
+    t = trader()
+    run(t.on_tweet(elon_tweet()))
+    run(t.on_rug_alert(MINT, "liquidity pulled: 80% removed in 3s"))
+    assert MINT not in t.positions and "RUG ALERT" in t.events[-1].detail
