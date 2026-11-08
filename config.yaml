@@ -1,0 +1,64 @@
+# ─────────────────────────────────────────────────────────────
+#  CTMC · Crypto Trade Meme Coins — configuration
+#  Every number here is a rule the bot obeys. Tune carefully.
+# ─────────────────────────────────────────────────────────────
+
+mode: paper            # paper | live   (live needs WALLET_PRIVATE_KEY + --i-understand-the-risk)
+chain: solana
+
+bankroll:
+  starting_usd: 500          # paper balance
+  max_open_positions: 4      # "always trading 3-4 coins"
+  risk_per_trade_pct: 10     # % of equity per new position
+  reserve_pct: 30            # never deploy this slice of equity
+  daily_loss_limit_pct: 15   # bot halts for the day past this drawdown
+
+# Governing ("leader") tokens. Meme coins on a chain tend to move after these.
+leaders:
+  SOL:      So11111111111111111111111111111111111111112
+  WIF:      EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm
+  FARTCOIN: 9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump
+
+leader_guard:
+  window_minutes: 5          # look-back for leader moves
+  exit_drop_pct: 2.5         # leader falls this much in window -> cut exposure
+  block_entries_drop_pct: 1.5
+
+# Hard filters — a coin failing ANY of these is never touched.
+universe:
+  min_volume_24h_usd: 1000000
+  min_liquidity_usd: 150000
+  min_pair_age_hours: 24
+  max_pairs_tracked: 25
+
+safety:
+  require_mint_authority_revoked: true
+  require_freeze_authority_revoked: true
+  min_lp_locked_or_burned_pct: 90
+  max_top10_holders_pct: 30      # excludes LP / known exchange wallets
+  max_single_holder_pct: 8
+  max_insider_cluster_pct: 15    # bundled / connected wallets from same funder
+  max_rugcheck_score: 1000       # rugcheck.xyz risk score (lower = safer)
+  max_sell_tax_pct: 5            # EVM honeypot check
+
+hype:                       # X / Twitter sentiment via xAI Grok API
+  enabled: true
+  model: grok-4
+  min_score: 65              # 0-100, organic hype strength
+  min_credible_accounts: 2   # known, non-paid large accounts talking about it
+  cache_minutes: 30
+
+flow:                       # order-flow logic (DexScreener txn stats)
+  capitulation_drop_pct: 12      # price drop in 1h that counts as a panic flush
+  capitulation_sell_ratio: 1.8   # sells/buys in 5m at the flush
+  exhaustion_sell_ratio: 1.1     # sells cooled back to ~even -> buy the dip
+  dryup_buy_ratio: 0.6           # buys/sells in 5m below this -> buyers dried up
+  heavy_sell_volume_mult: 2.0    # 5m sell vol vs 1h avg -> major sales coming in
+
+exits:
+  take_initial_at_multiple: 2.0  # at 2x, sell enough to recover the full cost
+  runner_trailing_stop_pct: 25   # house-money runner trails from its peak
+  hard_stop_loss_pct: 18
+  max_hold_hours: 72
+
+poll_seconds: 20
