@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS locks (key TEXT PRIMARY KEY, until REAL, reason TEXT)
 CREATE TABLE IF NOT EXISTS equity (ts REAL, equity REAL, cash REAL);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS ticks (token TEXT, ts REAL, price REAL);
+CREATE TABLE IF NOT EXISTS smart_holdings (wallet TEXT, mint TEXT, balance REAL, ts REAL, PRIMARY KEY (wallet, mint));
 CREATE INDEX IF NOT EXISTS ix_ticks ON ticks(token, ts);
 CREATE INDEX IF NOT EXISTS ix_pos_closed ON positions(status, closed_at);
 CREATE INDEX IF NOT EXISTS ix_fills_ts ON fills(ts);
@@ -168,6 +169,15 @@ class Store:
 
     def equity_curve(self, since: float = 0.0) -> list[tuple[float, float]]:
         return [(r[0], r[1]) for r in self.db.execute("SELECT ts, equity FROM equity WHERE ts >= ? ORDER BY ts", (since,))]
+
+    def smart_holding(self, wallet: str, mint: str, balance: float) -> None:
+        self.db.execute("INSERT INTO smart_holdings (wallet, mint, balance, ts) VALUES (?,?,?,?) "
+                        "ON CONFLICT(wallet, mint) DO UPDATE SET balance=excluded.balance, ts=excluded.ts",
+                        (wallet, mint, balance, time.time()))
+
+    def smart_holdings(self, since: float = 0.0) -> list[tuple[str, str, float]]:
+        return [(r[0], r[1], r[2]) for r in self.db.execute(
+            "SELECT wallet, mint, balance FROM smart_holdings WHERE ts >= ? AND balance > 0", (since,))]
 
     def tick(self, token: str, price: float) -> None:
         self.db.execute("INSERT INTO ticks (token, ts, price) VALUES (?,?,?)", (token, time.time(), price))

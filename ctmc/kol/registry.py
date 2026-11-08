@@ -129,8 +129,15 @@ class Registry:
         """Wallets worth streaming: celebrities + KOLs with a real, followable edge."""
         return [k for k in self.kols.values() if k.role == "celebrity" or k.weight(rules) > 0]
 
+    def watchlist(self, rules: dict) -> list[Kol]:
+        """Everyone worth STREAMING — more than the confirmers: fast-flippers are tracked too, as
+        information (copy-trade bait detection), never as confirmation. Best first, capped."""
+        keep = [k for k in self.kols.values() if k.role == "celebrity" or k.quality(rules) > 0]
+        keep.sort(key=lambda k: (k.role != "celebrity", -k.weight(rules), -k.quality(rules)))
+        return keep[: rules.get("max_tracked_wallets", 3000)]
+
     def wallets(self, rules: dict) -> list[str]:
-        return [w for k in self.tracked(rules) for w in k.wallets]
+        return list(dict.fromkeys(w for k in self.watchlist(rules) for w in k.wallets))
 
 
 def parse_money(text: str) -> float:

@@ -65,12 +65,13 @@ async def run(cfg, live: bool, console: Console) -> None:
     tracker = None
     if cfg["kol"].get("enabled", True):
         registry = Registry(cfg["kol"].get("registry", "data/kols.json")).load()
-        tracker = KolTracker(registry, cfg["kol"], on_trade=lambda t: trader.on_kol_trade(t), http=http)
+        tracker = KolTracker(registry, cfg["kol"], on_trade=lambda t: trader.on_kol_trade(t), http=http, store=store)
         trader.smart = SmartMoney(registry, tracker, cfg["kol"])
         tasks_extra.append(("kol wallets", tracker.run))
-        n = len(registry.tracked(cfg["kol"]))
-        trader.log("KOL", "-", f"tracking {n} proven / celebrity wallets of {len(registry.kols)} in the registry"
-                   + ("" if n else " — run `python -m ctmc kols import` to fill it"))
+        n, watched = len(registry.tracked(cfg["kol"])), len(registry.wallets(cfg["kol"]))
+        trader.log("KOL", "-", f"streaming {watched} wallets: {n} proven confirmers + fast-flippers as bait radar "
+                               f"(registry: {len(registry.kols)})"
+                   + ("" if watched else " — run `python -m ctmc kols import` and `kols discover` to fill it"))
 
     if cfg["narrative"].get("enabled", True):
         trader.narrative = Narrative(cfg["celebrities"], cfg["narrative"])

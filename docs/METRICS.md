@@ -34,6 +34,10 @@ Every metric found while reading 16 trading repos, and what CTMC does with it.
 | Cluster | ≥3 proven wallets, or total weight ≥1.5, buying within 15 min | Entry for narrative coins | ✅ | claude-trading-skills |
 | Sell decoding | Share of bag sold, held time vs their usual, share of smart money out | Ignore / trim / exit / urgent | ✅ | CTMC |
 | Celebrity's own wallet | Registry role `celebrity` | Buy = entry; sell = urgent exit | ✅ | CTMC |
+| Crowd read | Across ALL tracked wallets: proven holders, buyers vs sellers in the last hour, net SOL flow | Shown on every buy; insurance | ✅ | CTMC |
+| Copy-trade bait | Fast-flip KOLs bought in the last 2 min AND the coin is up ≥25% in 5 min → skip (we'd be exit liquidity) | Entry veto | ✅ | CTMC (your observation) |
+| Smart money selling into hype | ≥3 proven wallets selling, more than twice the buyers, net outflow | Entry veto | ✅ | CTMC |
+| Wallet discovery | Trending winners (GeckoTerminal) → each pool's swaps → wallets profitable on ≥2 different winners → full-history scoring | Grows the list to hundreds or thousands | ✅ | claude-trading-skills discovery method |
 | copy_score, bot probability (CV of trade gaps) | Weighted sample size, win rate, PF, consistency, recency | Wallet ranking | ◐ quality × followability is a simpler version | claude-trading-skills |
 
 ## 3. Price action
@@ -135,7 +139,11 @@ Every metric found while reading 16 trading repos, and what CTMC does with it.
 | Send → confirm time | Per swap | ✅ | Nautilus |
 | Realized vs quoted output | Fill from on-chain balance change vs quote | ✅ | Gateway |
 | Swap outcome | CONFIRMED / FAILED / DROPPED (proven expired) / UNRESOLVED, saved as pending before sending | ✅ | Gateway / Nautilus |
-| Priority fee per trade, land rate, fees burned on failed transactions | — | ◐ fee capped; per-trade fee not stored yet | Hummingbot |
+| Network fee per trade | `meta.fee` + Jito tip, converted at the live SOL price (paper: an estimate) | ✅ | Hummingbot Gateway |
+| PnL net of fees | Positions, journal, scorecards and report all subtract fees | ✅ | CTMC |
+| Cost viability gate | `(fee × expected txs) / size + round-trip slippage ≤ 8%`; size raised within a cap, else skip | ✅ | CTMC |
+| Ladder sale minimum | Halves worth < $4 are skipped (fee would eat them) | ✅ | CTMC |
+| Land rate, fees burned on failed transactions | — | ◐ swap outcomes stored; not aggregated yet | Hummingbot |
 | Post-trade sandwich check (same signer before and after in the slot) | — | ✗ next step; use Jito tips meanwhile | claude-trading-skills |
 
 ## 11. Performance (`python -m ctmc report`)
@@ -151,6 +159,7 @@ Every metric found while reading 16 trading repos, and what CTMC does with it.
 | Omega(0), CVaR 95% | Tail-aware alternatives to Sharpe | ✅ | Jesse / OpenBB |
 | Mark-to-market max drawdown | From equity snapshots | ✅ | freqtrade / Jesse |
 | Longest losing streak, median hold | — | ✅ | — |
+| Fees paid and fee drag | Total network fees and fees as % of money staked | ✅ | CTMC |
 | Breakdowns by signal source, exit rule, profile | Attribution | ✅ | freqtrade |
 | Sharpe, Sortino, Calmar, SQN, Kelly, Serenity | — | ✗ on purpose: misleading with few, fat-tailed trades | freqtrade / Jesse research |
 

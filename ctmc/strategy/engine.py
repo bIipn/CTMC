@@ -178,7 +178,8 @@ class Trader:
         if t.side == "buy":
             if t.mint in self.positions and self.smart:
                 self.smart.joined(t.mint, t.wallet, kol)
-                self.log("KOL", sym, f"{kol.name} [{kol.tier(self.smart.r)}] bought in — smart money adding")
+                if kol.weight(self.smart.r) > 0:                 # flippers are recorded, not announced
+                    self.log("KOL", sym, f"{kol.name} [{kol.tier(self.smart.r)}] bought in — smart money adding")
                 return
             if kol.role == "celebrity":
                 self.backed[t.mint] = (time.time(), kol.name)
@@ -196,7 +197,8 @@ class Trader:
         if not pos or not self.smart:
             return
         call = self.smart.decode_sell(t)
-        self.log("KOL", pos.symbol, f"{call.action.upper()}: {call.reason}")
+        if call.action != "ignore" or kol.weight(self.smart.r) > 0:
+            self.log("KOL", pos.symbol, f"{call.action.upper()}: {call.reason}")
         if call.action == "urgent":
             await self.close(pos, f"smart money: {call.reason}", urgent=True)
         elif call.action == "exit":
@@ -334,6 +336,11 @@ class Trader:
             if not verdict:
                 self.log("SKIP", sym, "; ".join(verdict.reasons[:3]))
                 return
+            if self.smart:
+                objection = self.smart.entry_warning(mint, snap.change_m5)
+                if objection:
+                    self.log("SKIP", sym, objection)
+                    return
             prof = (self.cfg.get("profiles") or {}).get(profile) or {}
             mult = self.smart.size_multiplier(conf) if (self.smart and conf) else 1.0
             late, late_note = self.lateness_scale(snap)
@@ -375,6 +382,8 @@ class Trader:
         lag = f" · {time.time() - tweet.created_at:.1f}s after the tweet" if tweet else ""
         mcap = f" · mcap ${snap.market_cap:,.0f} ({profile})" if snap.market_cap else ""
         smart = f" · {conf.describe()}" if conf is not None else ""
+        if self.smart:
+            smart += f" · {self.smart.consensus(mint).describe()}"
         notes = "".join(f" · {n}" for n in (late_note, gate_note, cost_note) if n)
         self.log("BUY", sym, f"{reason} — ${fill.usd:,.0f} @ {fill.price:.6g}, impact {fill.impact_pct:.2f}%"
                              f"{lag}{mcap}{smart}{notes} · size x{mult:.2g}")

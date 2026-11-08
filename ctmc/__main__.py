@@ -6,7 +6,8 @@
   python -m ctmc run                          start the bot (paper by default)
   python -m ctmc run --live --i-understand-the-risk
 
-  python -m ctmc kols import [--limit 60]     pull KOL wallets + stats from kolexplorer.com
+  python -m ctmc kols import [--limit 500]    pull KOL wallets + stats from kolexplorer.com
+  python -m ctmc kols discover [--pools 30]   find repeat-winner wallets from trending coins (Helius)
   python -m ctmc kols list                    who counts as smart money, and why
   python -m ctmc kols score <wallet> [--name] score any wallet from its own on-chain swaps
   python -m ctmc kols add <name> <wallet> [--x handle] [--celebrity]
@@ -154,6 +155,16 @@ async def cmd_kols(cfg, a) -> None:
         reg.save()
         con.print(f"[green]✔ {n} KOLs imported → {reg.path}[/]")
         con.print(_kol_table(reg, rules))
+    elif a.kcmd == "discover":
+        from ctmc.kol.discover import discover
+        async with httpx.AsyncClient(timeout=30) as http:
+            sol = (await Market(cfg.chain, http).prices([cfg.leaders["SOL"]])).get(cfg.leaders["SOL"], 0.0)
+            res = await discover(reg, rules, http, pools=a.pools, min_tokens=a.min_tokens,
+                                 max_score=a.max_score, sol_price=sol, log=con.print)
+        reg.save()
+        con.print(f"[green]✔ kept {res['kept']} of {res['candidates']} repeat winners from {res['winners']} trending coins "
+                  f"→ registry now {len(reg.kols)} wallets[/]")
+        con.print(_kol_table(reg, rules))
     elif a.kcmd == "add":
         reg.add(Kol(a.name, [a.wallet], x_handle=(a.x or "").lstrip("@"), role="celebrity" if a.celebrity else "kol"))
         reg.save()
@@ -218,7 +229,9 @@ def main(argv: list[str] | None = None) -> None:
         sub.add_parser(name).add_argument("--live", action="store_true")
     k = sub.add_parser("kols", help="manage the smart-money registry")
     ksub = k.add_subparsers(dest="kcmd")
-    ki = ksub.add_parser("import"); ki.add_argument("--limit", type=int, default=60)
+    ki = ksub.add_parser("import"); ki.add_argument("--limit", type=int, default=500)
+    kd = ksub.add_parser("discover"); kd.add_argument("--pools", type=int, default=30)
+    kd.add_argument("--min-tokens", type=int, default=2); kd.add_argument("--max-score", type=int, default=300)
     ksub.add_parser("list")
     ks = ksub.add_parser("score"); ks.add_argument("wallet"); ks.add_argument("--name")
     ka = ksub.add_parser("add"); ka.add_argument("name"); ka.add_argument("wallet")

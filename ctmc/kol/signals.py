@@ -46,6 +46,22 @@ class Confluence:
 
 
 @dataclass
+class Consensus:
+    """What the whole tracked crowd is doing with one coin — more wallets, closer to the truth."""
+    holders: int = 0              # proven wallets holding it now
+    holder_weight: float = 0.0
+    buyers: int = 0               # proven wallets that bought in the window
+    sellers: int = 0              # proven wallets that sold in the window
+    net_sol: float = 0.0          # SOL in (buys) minus SOL out (sells) by proven wallets in the window
+    flippers: int = 0             # fast-flip / copy-trade-farming wallets that bought in the bait window
+
+    def describe(self) -> str:
+        flow = f"net {'+' if self.net_sol >= 0 else '-'}{abs(self.net_sol):.1f} SOL"
+        return (f"crowd: {self.holders} proven holders · 1h {self.buyers} buying / {self.sellers} selling ({flow})"
+                + (f" · {self.flippers} fast-flippers just in" if self.flippers else ""))
+
+
+@dataclass
 class SellCall:
     action: str      # ignore | trim | exit | urgent
     reason: str
@@ -95,6 +111,48 @@ class SmartMoney:
                 c.names.append(f"{t.kol.name} [{t.kol.tier(self.r)}]")
                 c.celebrity |= t.kol.role == "celebrity"
         return c
+
+    def consensus(self, mint: str, window_s: float | None = None) -> Consensus:
+        """Aggregate every tracked wallet's activity in this coin (in-memory, instant)."""
+        now, window = time.time(), window_s or self.r.get("consensus_window_s", 3600)
+        bait_window = self.r.get("bait_window_s", 120)
+        c = Consensus()
+        for wallet, bal in self.tracker.holdings.get(mint, {}).items():
+            kol = self.reg.by_wallet.get(wallet)
+            w = kol.weight(self.r) if kol else 0.0
+            if bal > 0 and w > 0:
+                c.holders += 1
+                c.holder_weight += w
+        buyers, sellers, flippers = set(), set(), set()
+        for t in reversed(self.tracker.recent):
+            if now - t.ts > window:
+                break
+            if t.mint != mint:
+                continue
+            if t.kol.weight(self.r) > 0 or t.kol.role == "celebrity":
+                (buyers if t.side == "buy" else sellers).add(t.wallet)
+                c.net_sol += t.sol if t.side == "buy" else -t.sol
+            elif t.side == "buy" and self.is_flipper(t.kol) and now - t.ts <= bait_window:
+                flippers.add(t.wallet)
+        c.buyers, c.sellers, c.flippers = len(buyers), len(sellers), len(flippers)
+        c.holder_weight = round(c.holder_weight, 3)
+        c.net_sol = round(c.net_sol, 3)
+        return c
+
+    def is_flipper(self, kol) -> bool:
+        """Profitable but flips in seconds: farms its copy-traders. Information, never confirmation."""
+        return kol.role != "celebrity" and kol.quality(self.r) > 0 and kol.followability(self.r) == 0
+
+    def entry_warning(self, mint: str, change_m5: float) -> str:
+        """Reasons NOT to buy right now, from the crowd. '' = no objection."""
+        c = self.consensus(mint)
+        if c.flippers >= self.r.get("bait_min_wallets", 1) and change_m5 >= self.r.get("bait_pump_pct_5m", 25):
+            return (f"copy-trade wave: {c.flippers} fast-flip KOL(s) bought in the last {self.r.get('bait_window_s', 120)}s "
+                    f"and it's already +{change_m5:.0f}% in 5 min — we'd be their exit liquidity")
+        if (self.r.get("skip_if_smart_selling", True) and c.sellers >= self.r.get("smart_selling_min_wallets", 3)
+                and c.sellers > 2 * c.buyers and c.net_sol < 0):
+            return f"smart money is selling into this hype: {c.sellers} proven wallets out vs {c.buyers} in this hour"
+        return ""
 
     def is_cluster(self, c: Confluence) -> bool:
         return c.count >= self.r.get("cluster_min_wallets", 3) or c.weight >= self.r.get("cluster_min_weight", 1.5)

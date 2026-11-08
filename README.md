@@ -17,7 +17,7 @@ takes its stake back at 2x, and lets the rest ride a profit ladder until the vol
 
 | Trigger | What happens |
 |---|---|
-| **A celebrity posts a coin** | Pushed live from X. Verified by numeric user ID, so a fake or renamed account can't trigger it. The contract address comes from the text or any pump.fun / DexScreener / Birdeye / Solscan / Jupiter / GMGN link. |
+| **A celebrity posts a coin** | **41 accounts** in `celebrities.yaml` (add freely), pushed live from X. Verified by numeric user ID, so a fake or renamed account can't trigger it. The contract address comes from the text or any pump.fun / DexScreener / Birdeye / Solscan / Jupiter / GMGN link. |
 | **A celebrity's own wallet buys** | As strong as a tweet. Add their known wallets with `kols add --celebrity`. |
 | **Celebrity-name narrative** (the Andrew Tate effect) | Any post from a watched celebrity puts them "hot" for 12h. New pump.fun launches and DEX search results named after them or their words ("Top G", "Kekius Maximus") go on a **radar**. A radar coin is bought only once **3+ proven wallets** pile in. A name match alone is never enough. |
 
@@ -29,6 +29,8 @@ takes its stake back at 2x, and lets the rest ride a profit ladder until the vol
 | **Round-trip quote** | Coins you can't sell (honeypots), hidden taxes, losing >15% buying and selling straight back |
 | **Rug screen** (rugcheck) | Mint or freeze authority live, Token-2022 traps, LP not locked, whale or top-10 concentration, big dev bag, serial launchers, bundles |
 | **Bubble map** | Top holders funded by the same wallet (>12%), wallets linked to the dev (>5%) |
+| **The crowd** (insurance) | A **copy-trade wave**: fast-flip KOLs just bought and it's already +25% in 5 min, so we'd be their exit liquidity. Or **proven wallets selling into the hype**. |
+| **Costs** | Fees + slippage would eat >8% of the position (size is raised within a cap if that fixes it) |
 | **Leader guard** | SOL / WIF / FARTCOIN dumping, or their price feed gone quiet |
 | **Protections** | Kill switch on, paused after anomalies, coin cooldown, daily caps, a celebrity benched for a poor record |
 
@@ -57,10 +59,29 @@ takes its stake back at 2x, and lets the rest ride a profit ladder until the vol
 
 Exits that must land retry with rising slippage, widening only when the failure really was slippage.
 
-## Smart money (KOLs)
+### Fees & slippage: counted everywhere
+
+- Every buy and sale pays its **network fee** (priority + base + any Jito tip). Live fees are read from the chain; paper charges an estimate.
+- **Every profit figure is net**: positions, the journal, per-celebrity scorecards, the report.
+- **The 2x sale recovers your stake *plus every fee paid***, so the free bag is actually free.
+- A ladder half worth **under $4 is skipped**, because the fee would eat it.
+- Before buying, the **buy-then-sell round trip** must cost ≤8%, and **fees + slippage over the trade's life** must stay ≤8% of the position.
+
+## Smart money (KOLs): insurance, not copy-trading
+
+The bot never copies a KOL. It reads **the whole crowd**, hundreds to thousands of wallets, as insurance on a
+celebrity trade: how many proven wallets hold the coin, who bought and sold in the last hour, and the net money flow.
+
+- **Fast-flippers** (hold for seconds, thousands of trades a week) farm their copy traders. They're streamed only as a
+  **warning sign**. If they just bought and the coin is already pumping, it's a copy-trade wave and the bot sits it out.
+- **Discovery grows the list automatically:** `kols discover` mines today's trending winners for wallets that made money
+  on **several different** coins, scores each on its full history, and keeps the real ones. Run it daily; it compounds.
+- **Scales:** with a Helius plan that supports enhanced websockets, one subscription covers thousands of wallets.
+  Otherwise standard subscriptions are split across connections. What the crowd holds is saved, so it survives restarts.
 
 ```bash
 python -m ctmc kols import            # pull KOL wallets + stats from kolexplorer.com
+python -m ctmc kols discover          # find repeat-winner wallets from trending coins (Helius)
 python -m ctmc kols list              # who counts, and why
 python -m ctmc kols score <wallet> --name X   # score any wallet from its own on-chain swaps
 python -m ctmc kols add "Name" <wallet> --x handle --celebrity
@@ -83,7 +104,7 @@ cp .env.example .env                   # fill in your keys
 | `X_BEARER_TOKEN` | Instant tweets (filtered stream), ID lookups, engagement check | X API plan with filtered stream |
 | `WEBHOOK_SECRET` | Cheaper: a tweet-alert service POSTs to the bot | Depends on the service |
 | `SOLANA_RPC_URL` | Speed, bubble maps, live wallet tracking (Helius / Triton) | Free tier possible |
-| `HELIUS_API_KEY` | Scoring wallets from their own history | Free tier |
+| `HELIUS_API_KEY` | Wallet discovery + scoring; enhanced websocket tracks thousands of wallets on plans that include it | Free tier works |
 | `JUPITER_API_KEY` | Prices, quotes, swaps (`api.jup.ag`; free tier is 60/min) | Free |
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Alerts + remote control from your phone | Free |
 | `XAI_API_KEY` | Grok's after-buy hype review | Paid |
@@ -99,7 +120,7 @@ python -m ctmc test-tweet "<text>" --as elonmusk      # what the bot would do wi
 python -m ctmc report [--days 30]                     # performance by celebrity, exit rule, profile
 python -m ctmc simulate --compare                     # time machine: replay your exits 10,000x
 python -m ctmc pause | resume                         # kill switch (also /pause, /resume on Telegram)
-python -m pytest -q                                   # 67 scenario tests
+python -m pytest -q                                   # 79 scenario tests
 ```
 
 **Telegram:** `/status` `/profit` `/pause` `/resume` `/sellall` `/sell SYMBOL`. Only your chat ID is accepted.

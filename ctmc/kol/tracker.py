@@ -22,6 +22,7 @@ from ctmc.kol.registry import Kol, Registry
 
 WSOL = "So11111111111111111111111111111111111111112"
 STABLES = {"EPjFWJ5DtsqmT6PrCNTP9e3ArWn8GFbQiZgYMg9oWtpc", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}
+HELIUS_WS = "wss://atlas-mainnet.helius-rpc.com/?api-key={key}"     # enhanced websocket (Business plans)
 
 
 @dataclass
@@ -89,8 +90,11 @@ OnTrade = Callable[[KolTrade], Awaitable[None]]
 
 
 class KolTracker:
-    def __init__(self, registry: Registry, rules: dict, on_trade: OnTrade, http: httpx.AsyncClient | None = None):
+    def __init__(self, registry: Registry, rules: dict, on_trade: OnTrade, http: httpx.AsyncClient | None = None,
+                 store=None):
         self.registry = registry
+        self.store = store                              # holdings index survives restarts
+        self.mode_note = ""
         self.rules = rules
         self.on_trade = on_trade
         self.http = http or httpx.AsyncClient(timeout=15)
@@ -104,6 +108,9 @@ class KolTracker:
         self.holdings: dict[str, dict[str, float]] = defaultdict(dict)
         self.first_buy: dict[tuple[str, str], float] = {}         # (wallet, mint) -> ts
         self.recent: list[KolTrade] = []
+        if store is not None:
+            for wallet, mint, bal in store.smart_holdings(time.time() - 14 * 86400):
+                self.holdings[mint][wallet] = bal
 
     async def _rpc(self, method: str, params: list):
         r = await self.http.post(self.rpc, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
@@ -138,10 +145,12 @@ class KolTracker:
 
     async def record(self, trade: KolTrade) -> None:
         self.holdings[trade.mint][trade.wallet] = trade.balance_after
+        if self.store is not None:
+            self.store.smart_holding(trade.wallet, trade.mint, trade.balance_after)
         if trade.side == "buy":
             self.first_buy.setdefault((trade.wallet, trade.mint), trade.ts)
         self.recent.append(trade)
-        del self.recent[:-2000]
+        del self.recent[:-int(self.rules.get("recent_trades_kept", 50_000))]
         await self.on_trade(trade)
 
     def buyers(self, mint: str, within_s: float | None = None) -> list[KolTrade]:
@@ -169,35 +178,97 @@ class KolTracker:
         return got
 
     async def run(self) -> None:
-        import websockets
-
+        """Stream every watched wallet. Helius enhanced websocket when available (one subscription
+        covers thousands of wallets and delivers the full transaction); otherwise standard RPC
+        log subscriptions, sharded across connections."""
         wallets = self.registry.wallets(self.rules)
         if not wallets:
-            await asyncio.Event().wait()             # nothing to track: idle quietly
+            await asyncio.Event().wait()                     # nothing to track: idle quietly
+        mode = self.rules.get("tracker_mode", "auto")
+        if mode == "helius" or (mode == "auto" and os.getenv("HELIUS_API_KEY")):
+            if await self._run_helius(wallets) == "unsupported":
+                self.mode_note = "Helius enhanced websocket not available on this plan — using standard RPC subscriptions"
+            else:
+                return
+        per = max(1, int(self.rules.get("wallets_per_connection", 100)))
+        shards = [wallets[i:i + per] for i in range(0, len(wallets), per)]
+        await asyncio.gather(*(self._run_shard(sh) for sh in shards))
+
+    async def _run_shard(self, wallets: list[str]) -> None:
+        import websockets
+
         while True:
+            req: dict[int, str] = {}
+            subs: dict[int, str] = {}
             try:
                 async with websockets.connect(self.ws_url, ping_interval=20, max_size=2**22) as ws:
                     self.connected = True
-                    self._req.clear()
-                    self._subs.clear()
                     for i, w in enumerate(wallets, start=1):
-                        self._req[i] = w
+                        req[i] = w
                         await ws.send(json.dumps({"jsonrpc": "2.0", "id": i, "method": "logsSubscribe",
                                                   "params": [{"mentions": [w]}, {"commitment": "confirmed"}]}))
                     async for raw in ws:
-                        await self.handle_message(json.loads(raw))
+                        await self.handle_message(json.loads(raw), req, subs)
             except (OSError, asyncio.TimeoutError, websockets.WebSocketException):
                 self.connected = False
                 await asyncio.sleep(2)
 
-    async def handle_message(self, msg: dict) -> None:
+    async def handle_message(self, msg: dict, req: dict | None = None, subs: dict | None = None) -> None:
+        req = self._req if req is None else req
+        subs = self._subs if subs is None else subs
         if "id" in msg and "result" in msg:
-            w = self._req.pop(msg["id"], None)
+            w = req.pop(msg["id"], None)
             if w:
-                self._subs[msg["result"]] = w
+                subs[msg["result"]] = w
         elif msg.get("method") == "logsNotification":
             p = msg["params"]
-            w = self._subs.get(p["subscription"])
+            w = subs.get(p["subscription"])
             val = (p.get("result") or {}).get("value") or {}
             if w and not val.get("err") and val.get("signature"):
                 asyncio.create_task(self.handle_signature(w, val["signature"]))
+
+    async def _run_helius(self, wallets: list[str]) -> str:
+        import websockets
+
+        url = HELIUS_WS.format(key=os.getenv("HELIUS_API_KEY", ""))
+        watched = set(wallets)
+        while True:
+            try:
+                async with websockets.connect(url, ping_interval=20, max_size=2**24) as ws:
+                    self.connected = True
+                    for n, i in enumerate(range(0, len(wallets), 1000), start=1):
+                        await ws.send(json.dumps({"jsonrpc": "2.0", "id": n, "method": "transactionSubscribe", "params": [
+                            {"accountInclude": wallets[i:i + 1000], "vote": False, "failed": False},
+                            {"commitment": "confirmed", "encoding": "jsonParsed", "transactionDetails": "full",
+                             "maxSupportedTransactionVersion": 0}]}))
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        if "error" in msg and "id" in msg:
+                            return "unsupported"
+                        await self.handle_helius(msg, watched)
+            except (OSError, asyncio.TimeoutError, websockets.WebSocketException) as exc:
+                self.connected = False
+                if "401" in str(exc) or "403" in str(exc):
+                    return "unsupported"
+                await asyncio.sleep(2)
+
+    async def handle_helius(self, msg: dict, watched: set[str]) -> None:
+        """transactionNotification -> trades for every watched wallet in it (no extra RPC call)."""
+        if msg.get("method") != "transactionNotification":
+            return
+        res = (msg.get("params") or {}).get("result") or {}
+        sig = res.get("signature", "")
+        if not sig or sig in self._seen:
+            return
+        self._seen.add(sig)
+        wrapped = res.get("transaction") or {}
+        tx = {"meta": wrapped.get("meta") or {}, "transaction": wrapped.get("transaction") or {}}
+        keys = (tx["transaction"].get("message") or {}).get("accountKeys") or []
+        for k in keys:
+            w = k.get("pubkey") if isinstance(k, dict) else k
+            kol = self.registry.by_wallet.get(w) if w in watched else None
+            if not kol:
+                continue
+            for t in parse_wallet_trades(tx, w):
+                await self.record(KolTrade(w, kol, t["mint"], t["side"], t["tokens"], t["sol"],
+                                           t["before"], t["after"], sig))

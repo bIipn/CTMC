@@ -894,3 +894,106 @@ def test_tiny_ladder_sales_are_skipped_not_paid_for():
     run(t.on_price(MINT, 10.5))
     assert t.positions[MINT].qty == qty and 10 in t.positions[MINT].ladder_hits   # rung marked, nothing sold
     assert "not worth the fee" in t.events[-1].detail
+
+
+# ── the crowd: hundreds-thousands of wallets, copy-trade bait, consensus, discovery ──
+from ctmc.kol.discover import parse_trending, pick_candidates, profits_on_token  # noqa: E402
+
+
+def _crowd_trader(*kols, market=None):
+    sm = _smart(*kols)
+    t = trader(market=market or FakeMarket())
+    t.smart = sm
+    return t, sm
+
+
+def _trade(k, side, sol=1.0, ago=0.0, mint=MINT):
+    tr = KolTrade(k.wallets[0], k, mint, side, 1000, sol, 0 if side == "buy" else 1000, 1000 if side == "buy" else 0, "s")
+    tr.ts = time.time() - ago
+    return tr
+
+
+def test_flippers_are_streamed_as_information_not_confirmation():
+    reg = Registry("/nonexistent.json")
+    swing, flip, loser = kol("Swing", hold=3600), kol("Flip", hold=12, trades=20_000), kol("Loser", wr=35)
+    for k in (swing, flip, loser):
+        reg.add(k)
+    assert [k.name for k in reg.tracked(KR)] == ["Swing"]                     # only proven + followable confirm
+    assert set(reg.wallets(KR)) == {"WSwing", "WFlip"}                        # flippers streamed for bait radar
+    assert len(reg.watchlist(dict(KR, max_tracked_wallets=1))) == 1
+
+
+def test_copy_trade_wave_is_skipped():
+    flip = kol("Flip", hold=12, trades=20_000)
+    t, sm = _crowd_trader(flip, market=FakeMarket(snap(m5=40)))
+    run(sm.tracker.record(_trade(flip, "buy", ago=30)))
+    run(t.on_tweet(elon_tweet()))
+    assert MINT not in t.positions and "copy-trade wave" in t.events[-1].detail
+
+
+def test_flipper_buy_without_a_pump_is_not_blocked():
+    flip = kol("Flip", hold=12, trades=20_000)
+    t, sm = _crowd_trader(flip, market=FakeMarket(snap(m5=3)))
+    run(sm.tracker.record(_trade(flip, "buy", ago=30)))
+    run(t.on_tweet(elon_tweet()))
+    assert MINT in t.positions and "1 fast-flippers just in" in [e for e in t.events if e.kind == "BUY"][0].detail
+
+
+def test_smart_money_selling_into_the_hype_is_skipped():
+    ks = [kol(f"S{i}", hold=3600) for i in range(3)]
+    t, sm = _crowd_trader(*ks)
+    for k in ks:
+        run(sm.tracker.record(_trade(k, "sell", sol=5, ago=600)))
+    run(t.on_tweet(elon_tweet()))
+    assert MINT not in t.positions and "selling into this hype" in t.events[-1].detail
+
+
+def test_consensus_read():
+    a, b, c, flip = kol("A2", hold=3600), kol("B2", hold=3600), kol("C2", hold=3600), kol("F2", hold=9, trades=9_000)
+    _, sm = _crowd_trader(a, b, c, flip)
+    for tr in (_trade(a, "buy", 2), _trade(b, "buy", 3), _trade(c, "sell", 1), _trade(flip, "buy", 9, ago=20)):
+        run(sm.tracker.record(tr))
+    cs = sm.consensus(MINT)
+    assert (cs.holders, cs.buyers, cs.sellers, cs.flippers) == (2, 2, 1, 1) and cs.net_sol == 4.0
+    assert "2 proven holders" in cs.describe()
+
+
+def test_helius_enhanced_notification_becomes_trades():
+    a = kol("A3", hold=3600, wallet="WA3")
+    _, sm = _crowd_trader(a)
+    note = {"method": "transactionNotification", "params": {"result": {"signature": "sig1", "transaction": {
+        "transaction": {"message": {"accountKeys": [{"pubkey": "WA3"}, {"pubkey": "POOL"}]}},
+        "meta": _rpc_tx("WA3", MINT, 0, 5000, 3e9, 2e9)["meta"]}}}}
+    run(sm.tracker.handle_helius(note, {"WA3"}))
+    run(sm.tracker.handle_helius(note, {"WA3"}))                               # duplicate delivery ignored
+    assert len(sm.tracker.recent) == 1 and sm.tracker.recent[0].side == "buy"
+    assert sm.tracker.holdings[MINT]["WA3"] == 5000
+
+
+def test_holdings_index_survives_restart(store):
+    a = kol("A4", hold=3600, wallet="WA4")
+    reg = Registry("/nonexistent.json")
+    reg.add(a)
+
+    async def noop(t):
+        pass
+    tr = KolTracker(reg, KR, noop, store=store)
+    run(tr.record(_trade(a, "buy")))
+    again = KolTracker(reg, KR, noop, store=Store(store.path))
+    assert again.holdings[MINT]["WA4"] == 1000
+
+
+def test_discovery_finds_repeat_winners():
+    payload = {"data": [{"attributes": {"address": "POOL1", "name": "TOPG / SOL", "price_change_percentage": {"h24": "340"},
+                                        "volume_usd": {"h24": "2500000"}},
+                         "relationships": {"base_token": {"data": {"id": f"solana_{MINT}"}}}}]}
+    w = parse_trending(payload)[0]
+    assert (w.pool, w.mint, w.change_24h) == ("POOL1", MINT, 340.0)
+    txs = [dict(_helius_swap(1, "PRO", MINT, 1000, 2.0), feePayer="PRO"),
+           dict(_helius_swap(2, "PRO", MINT, -1000, 7.0), feePayer="PRO"),
+           dict(_helius_swap(1, "BAG", MINT, 1000, 2.0), feePayer="BAG"),
+           dict(_helius_swap(2, "BAG", MINT, -1000, 0.5), feePayer="BAG")]
+    profits = profits_on_token(txs, MINT)
+    assert profits == {"PRO": 5.0, "BAG": -1.5}
+    picks = pick_candidates({"T1": {"PRO": 5.0, "BAG": -1.5}, "T2": {"PRO": 2.0, "ONE": 9.0}}, min_tokens=2, min_profit_sol=1)
+    assert [c.wallet for c in picks] == ["PRO"] and picks[0].profit_sol == 7.0

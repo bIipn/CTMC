@@ -110,6 +110,18 @@ kol:
   cluster_min_wallets: 3
   cluster_min_weight: 1.5
   allow_cluster_entries_without_celebrity: false   # you asked for celebrity hype only
+  # the crowd — hundreds to thousands of wallets, more info = closer to the truth
+  max_tracked_wallets: 3000      # streamed live: proven confirmers + fast-flippers (as bait radar)
+  tracker_mode: auto             # auto: Helius enhanced websocket if available, else sharded RPC subscriptions
+  wallets_per_connection: 100
+  recent_trades_kept: 50000
+  consensus_window_s: 3600       # crowd read covers the last hour
+  # copy-trade bait: fast-flip KOLs pump coins for their copy-traders, then dump on them
+  bait_window_s: 120             # fast-flippers bought in the last 2 min ...
+  bait_min_wallets: 1
+  bait_pump_pct_5m: 25           # ... and it's already +25% in 5 min -> a copy-trade wave: don't be exit liquidity
+  skip_if_smart_selling: true    # proven wallets dumping into the celebrity hype -> skip it
+  smart_selling_min_wallets: 3
   # decoding their sells
   full_exit_fraction: 0.9        # sold >= 90% of their bag = they're out
   early_exit_fraction: 0.5       # out in under half their usual hold time = they know something
